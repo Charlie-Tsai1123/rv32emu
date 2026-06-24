@@ -52,6 +52,18 @@ BIN := $(OUT)/rv32emu
 CFLAGS = -std=gnu11 $(KCONFIG_CFLAGS) -Wall -Wextra -Werror
 CFLAGS += -Wno-unused-label -include src/common.h -Isrc/ $(CFLAGS_NO_CET)
 LDFLAGS += $(KCONFIG_LDFLAGS)
+
+# virtio-snd uses PortAudio in system emulation mode.
+ifeq ($(CONFIG_SYSTEM),y)
+PORTAUDIO_CFLAGS := $(shell pkg-config --cflags portaudio-2.0 2>/dev/null)
+PORTAUDIO_LIBS := $(shell pkg-config --libs portaudio-2.0 2>/dev/null)
+ifeq ($(PORTAUDIO_LIBS),)
+PORTAUDIO_LIBS := -lportaudio
+endif
+CFLAGS += $(PORTAUDIO_CFLAGS)
+LDFLAGS += $(PORTAUDIO_LIBS) -lpthread -lm
+endif
+
 OBJS_EXT :=
 deps :=
 
