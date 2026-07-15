@@ -26,6 +26,7 @@
 
 #define VSND_CNFA_FRAME_SZ 2 /* S16 = 2 bytes per sample */
 #define VSND_FLUSH_QUEUE 0x4
+/* semu-like pacing: keep only one PCM batch pending in host queue. */
 #define VSND_MAX_PENDING_BUFS 6
 
 enum {
@@ -293,7 +294,6 @@ typedef struct {
     vsnd_buf_queue_node_t *buf_tail;
 
     vsnd_stream_sel_t v;
-    uint32_t epoch;
 } virtio_snd_prop_t;
 
 typedef struct {
@@ -385,10 +385,13 @@ static void vsnd_clear_buf_queue(virtio_snd_prop_t *props)
 
 static void virtio_snd_set_fail(virtio_snd_state_t *vsnd)
 {
-    vsnd->status |= VIRTIO_STATUS_DEVICE_NEEDS_RESET;
+    uint32_t old_status = __atomic_fetch_or(&vsnd->status,
+                                            VIRTIO_STATUS_DEVICE_NEEDS_RESET,
+                                            __ATOMIC_ACQ_REL);
 
-    if (vsnd->status & VIRTIO_STATUS_DRIVER_OK)
-        vsnd->interrupt_status |= VIRTIO_INT_CONF_CHANGE;
+    if (old_status & VIRTIO_STATUS_DRIVER_OK)
+        __atomic_fetch_or(&vsnd->interrupt_status, VIRTIO_INT_CONF_CHANGE,
+                          __ATOMIC_RELEASE);
 
     rv_log_error("virtio-snd: DEVICE_NEEDS_RESET");
 }
@@ -450,7 +453,6 @@ static inline uint32_t vsnd_preprocess(virtio_snd_state_t *vsnd, uint32_t addr)
 static void vsnd_reset_stream(virtio_snd_prop_t *props)
 {
     pthread_mutex_lock(&props->lock.lock);
-    props->epoch++;
     props->lock.releasing = true;
     pthread_cond_broadcast(&props->lock.readable);
     pthread_cond_broadcast(&props->lock.writable);
@@ -475,10 +477,10 @@ static void vsnd_reset_stream(virtio_snd_prop_t *props)
 
 static void virtio_snd_update_status(virtio_snd_state_t *vsnd, uint32_t status)
 {
-    vsnd->status |= status;
-
-    if (status)
+    if (status) {
+        __atomic_fetch_or(&vsnd->status, status, __ATOMIC_RELEASE);
         return;
+    }
 
     uint32_t *ram = vsnd->ram;
     void *priv = vsnd->priv;
@@ -691,7 +693,6 @@ static uint32_t virtio_snd_pcm_prepare(virtio_snd_state_t *vsnd,
         return VIRTIO_SND_S_BAD_MSG;
 
     pthread_mutex_lock(&props->lock.lock);
-    props->epoch++;
     props->lock.releasing = true;
     pthread_cond_broadcast(&props->lock.readable);
     pthread_cond_broadcast(&props->lock.writable);
@@ -800,14 +801,11 @@ static uint32_t virtio_snd_pcm_stop(virtio_snd_state_t *vsnd,
     if (!props->pa_stream)
         return VIRTIO_SND_S_IO_ERR;
 
+    /* semu-like behavior: STOP only stops the PortAudio stream and updates
+     * the PCM state. Do not clear the host audio queue here. RELEASE is
+     * responsible for final cleanup/flush.
+     */
     props->pp.hdr.hdr.code = VIRTIO_SND_R_PCM_STOP;
-
-    pthread_mutex_lock(&props->lock.lock);
-    props->epoch++;
-    props->lock.releasing = true;
-    pthread_cond_broadcast(&props->lock.readable);
-    pthread_cond_broadcast(&props->lock.writable);
-    pthread_mutex_unlock(&props->lock.lock);
 
     PaError err = paNoError;
     if (Pa_IsStreamActive(props->pa_stream) == 1)
@@ -819,16 +817,9 @@ static uint32_t virtio_snd_pcm_stop(virtio_snd_state_t *vsnd,
         return VIRTIO_SND_S_IO_ERR;
     }
 
-    pthread_mutex_lock(&props->lock.lock);
-    vsnd_clear_buf_queue(props);
-    props->lock.buf_ev_notify = 0;
-    pthread_cond_broadcast(&props->lock.writable);
-    pthread_mutex_unlock(&props->lock.lock);
-
     *payload_len = 0;
     return VIRTIO_SND_S_OK;
 }
-
 static uint32_t virtio_snd_pcm_release(virtio_snd_state_t *vsnd,
                                        const virtio_snd_pcm_hdr_t *request,
                                        uint32_t *payload_len)
@@ -849,17 +840,19 @@ static uint32_t virtio_snd_pcm_release(virtio_snd_state_t *vsnd,
 
     props->pp.hdr.hdr.code = VIRTIO_SND_R_PCM_RELEASE;
 
+    /* semu-like behavior: RELEASE wakes callback/enqueue waiters, discards
+     * the host-side audio queue, closes PortAudio, and then flushes pending
+     * TX virtqueue requests so Linux can observe that the I/O queue is empty.
+     */
     pthread_mutex_lock(&props->lock.lock);
-    props->epoch++;
     props->lock.releasing = true;
     pthread_cond_broadcast(&props->lock.readable);
     pthread_cond_broadcast(&props->lock.writable);
+    vsnd_clear_buf_queue(props);
+    props->lock.buf_ev_notify = 0;
     pthread_mutex_unlock(&props->lock.lock);
 
     if (props->pa_stream) {
-        if (Pa_IsStreamActive(props->pa_stream) == 1)
-            Pa_StopStream(props->pa_stream);
-
         PaError err = Pa_CloseStream(props->pa_stream);
         if (err != paNoError)
             rv_log_error("PortAudio Pa_CloseStream failed: %s",
@@ -867,41 +860,30 @@ static uint32_t virtio_snd_pcm_release(virtio_snd_state_t *vsnd,
         props->pa_stream = NULL;
     }
 
-    pthread_mutex_lock(&props->lock.lock);
-    vsnd_clear_buf_queue(props);
-    props->lock.buf_ev_notify = 0;
-    pthread_cond_broadcast(&props->lock.writable);
-    pthread_mutex_unlock(&props->lock.lock);
-
     virtio_queue_notify_handler(vsnd, VSND_FLUSH_QUEUE | VSND_QUEUE_TX);
-
-    pthread_mutex_lock(&props->lock.lock);
-    vsnd_clear_buf_queue(props);
-    props->lock.buf_ev_notify = 0;
-    props->lock.releasing = false;
-    pthread_cond_broadcast(&props->lock.writable);
-    pthread_mutex_unlock(&props->lock.lock);
 
     *payload_len = 0;
     return VIRTIO_SND_S_OK;
 }
-
 static bool __virtio_snd_frame_enqueue(virtio_snd_state_t *vsnd,
                                        const void *payload,
                                        uint32_t n,
-                                       uint32_t stream_id,
-                                       uint32_t expected_epoch)
+                                       uint32_t stream_id)
 {
     virtio_snd_priv_t *p = vsnd_priv(vsnd);
     virtio_snd_prop_t *props = &p->props[stream_id];
 
     pthread_mutex_lock(&props->lock.lock);
 
+    /* semu-like pacing: keep only one PCM request batch in the host-side
+     * queue. This prevents the guest from completing too far ahead of the
+     * PortAudio consumer.
+     */
     while (props->lock.buf_ev_notify >= VSND_MAX_PENDING_BUFS &&
-           !props->lock.releasing && props->epoch == expected_epoch)
+           !props->lock.releasing)
         pthread_cond_wait(&props->lock.writable, &props->lock.lock);
 
-    if (props->lock.releasing || props->epoch != expected_epoch ||
+    if (props->lock.releasing ||
         !vsnd_stream_accepts_tx(props->pp.hdr.hdr.code)) {
         pthread_mutex_unlock(&props->lock.lock);
         return false;
@@ -929,7 +911,6 @@ static bool __virtio_snd_frame_enqueue(virtio_snd_state_t *vsnd,
     pthread_mutex_unlock(&props->lock.lock);
     return true;
 }
-
 static int virtio_snd_stream_cb(const void *input,
                                 void *output,
                                 unsigned long frame_cnt,
@@ -942,10 +923,8 @@ static int virtio_snd_stream_cb(const void *input,
     (void) status_flags;
 
     vsnd_stream_sel_t *sel = (vsnd_stream_sel_t *) user_data;
-    uint32_t stream_id = sel->stream_id;
 
-    /*
-     * user_data points to props->v. Recover the containing virtio_snd_prop_t
+    /* user_data points to props->v. Recover the containing virtio_snd_prop_t
      * using the offset of the v field.
      */
     virtio_snd_prop_t *props =
@@ -955,8 +934,6 @@ static int virtio_snd_stream_cb(const void *input,
     int channels = props->pp.channels ? props->pp.channels : 1;
     uint32_t out_bytes = (uint32_t) frame_cnt * channels * VSND_CNFA_FRAME_SZ;
     uint8_t *out = (uint8_t *) output;
-
-    (void) stream_id;
 
     pthread_mutex_lock(&props->lock.lock);
 
@@ -991,15 +968,21 @@ static int virtio_snd_stream_cb(const void *input,
     if (written < out_bytes)
         memset(out + written, 0, out_bytes - written);
 
+    /* Keep the pending-batch flag set until the whole host queue is consumed.
+     * This is still semu-like one-batch pacing, but avoids blocking the audio
+     * callback when a single batch spans multiple callbacks.
+     */
     if (props->lock.buf_ev_notify > 0)
+    {
         props->lock.buf_ev_notify--;
+    }
 
     pthread_cond_signal(&props->lock.writable);
+
     pthread_mutex_unlock(&props->lock.lock);
 
     return paContinue;
 }
-
 static int virtio_snd_tx_desc_handler(virtio_snd_state_t *vsnd,
                                       virtio_snd_queue_t *queue,
                                       uint32_t desc_idx,
@@ -1043,15 +1026,12 @@ static int virtio_snd_tx_desc_handler(virtio_snd_state_t *vsnd,
     bool bad = stream_id >= VSND_DEV_CNT_MAX;
     bool enqueued = false;
     uint32_t ret_len = 0;
-    uint32_t epoch = 0;
-
     virtio_snd_prop_t *props = NULL;
     if (!bad) {
         virtio_snd_priv_t *p = vsnd_priv(vsnd);
         props = &p->props[stream_id];
 
         pthread_mutex_lock(&props->lock.lock);
-        epoch = props->epoch;
         bool accepting = !props->lock.releasing &&
                          vsnd_stream_accepts_tx(props->pp.hdr.hdr.code);
         pthread_mutex_unlock(&props->lock.lock);
@@ -1081,7 +1061,7 @@ static int virtio_snd_tx_desc_handler(virtio_snd_state_t *vsnd,
 
         if (!bad && __virtio_snd_frame_enqueue(vsnd, payload,
                                                payload_desc->len,
-                                               stream_id, epoch))
+                                               stream_id))
             enqueued = true;
 
         ret_len += payload_desc->len;
@@ -1093,7 +1073,7 @@ static int virtio_snd_tx_desc_handler(virtio_snd_state_t *vsnd,
 
     if (!bad && enqueued && props) {
         pthread_mutex_lock(&props->lock.lock);
-        if (!props->lock.releasing && props->epoch == epoch) {
+        if (!props->lock.releasing) {
             props->lock.buf_ev_notify++;
             pthread_cond_signal(&props->lock.readable);
         }
@@ -1307,10 +1287,12 @@ static void virtio_queue_notify_handler(virtio_snd_state_t *vsnd, int index)
     uint32_t *ram = vsnd->ram;
     virtio_snd_queue_t *queue = &vsnd->queues[index & 0x03];
 
-    if (vsnd->status & VIRTIO_STATUS_DEVICE_NEEDS_RESET)
+    uint32_t status = __atomic_load_n(&vsnd->status, __ATOMIC_ACQUIRE);
+
+    if (status & VIRTIO_STATUS_DEVICE_NEEDS_RESET)
         return;
 
-    if (!((vsnd->status & VIRTIO_STATUS_DRIVER_OK) && queue->ready)) {
+    if (!((status & VIRTIO_STATUS_DRIVER_OK) && queue->ready)) {
         virtio_snd_set_fail(vsnd);
         return;
     }
@@ -1384,10 +1366,10 @@ static void virtio_queue_notify_handler(virtio_snd_state_t *vsnd, int index)
     ram[queue->queue_used] &= MASK(16);
     ram[queue->queue_used] |= ((uint32_t) new_used) << 16;
 
+    /* Publish used-ring writes before making the IRQ visible to the guest. */
     if (!(ram[queue->queue_avail] & 1))
-        vsnd->interrupt_status |= VIRTIO_INT_USED_RING;
-
-    
+        __atomic_fetch_or(&vsnd->interrupt_status, VIRTIO_INT_USED_RING,
+                          __ATOMIC_RELEASE);
 }
 
 static void *virtio_snd_tx_thread(void *arg)
@@ -1467,9 +1449,9 @@ uint32_t virtio_snd_read(virtio_snd_state_t *vsnd, uint32_t addr)
     case _(QueueReady):
         return (uint32_t) VSND_QUEUE.ready;
     case _(InterruptStatus):
-        return vsnd->interrupt_status;
+        return __atomic_load_n(&vsnd->interrupt_status, __ATOMIC_ACQUIRE);
     case _(Status):
-        return vsnd->status;
+        return __atomic_load_n(&vsnd->status, __ATOMIC_ACQUIRE);
     case _(ConfigGeneration):
         return VIRTIO_CONFIG_GENERATE;
     default:
@@ -1565,7 +1547,7 @@ void virtio_snd_write(virtio_snd_state_t *vsnd, uint32_t addr, uint32_t value)
         }
         break;
     case _(InterruptACK):
-        vsnd->interrupt_status &= ~value;
+        __atomic_fetch_and(&vsnd->interrupt_status, ~value, __ATOMIC_ACQ_REL);
         break;
     case _(Status):
         virtio_snd_update_status(vsnd, value);
