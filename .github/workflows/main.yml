@@ -488,7 +488,7 @@ jobs:
             sudo apt-get install -q=2 -y make curl wget libsdl2-dev libsdl2-mixer-dev \
                  lsb-release software-properties-common gnupg bc device-tree-compiler expect p7zip-full e2fsprogs || {
               echo "WARNING: Some packages failed, retrying critical ones..."
-              sudo apt-get install -q=2 -y --no-download make curl wget || true
+              sudo apt-get install -q=2 -y --no-download make curl wget expect bc device-tree-compiler p7zip-full e2fsprogs || true
             }
 
     - name: Install LLVM
