@@ -27,7 +27,7 @@
 #define VSND_CNFA_FRAME_SZ 2 /* S16 = 2 bytes per sample */
 #define VSND_FLUSH_QUEUE 0x4
 /* semu-like pacing: keep only one PCM batch pending in host queue. */
-#define VSND_MAX_PENDING_BUFS 6
+#define VSND_MAX_PENDING_BUFS 2
 
 enum {
     VSND_QUEUE_CTRL = 0,
