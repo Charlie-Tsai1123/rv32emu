@@ -16,6 +16,11 @@
 #include "utils.h"
 #include "virtio.h"
 
+/*
+ * semu always consumes/emits a 12-byte virtio-net header and does not advertise
+ * extra feature bits in word 0.  Keeping this path avoids changing the Linux
+ * guest driver's negotiated layout while adding the missing backends.
+ */
 #define VNET_FEATURES_0 0
 #define VNET_FEATURES_1 1 /* VIRTIO_F_VERSION_1 */
 
@@ -202,6 +207,11 @@ static bool vnet_build_iovs(virtio_net_state_t *vnet,
             return false;
         }
 
+        if (*niovs >= VNET_QUEUE_NUM_MAX) {
+            virtio_net_set_fail(vnet);
+            return false;
+        }
+
         if (!vnet_guest_range_ok(desc->addr, desc->len)) {
             virtio_net_set_fail(vnet);
             return false;
@@ -228,6 +238,32 @@ static ssize_t vnet_handle_read(netdev_t *netdev,
                                 size_t niovs)
 {
     switch (netdev->type) {
+#if defined(__APPLE__)
+    case NETDEV_IMPL_vmnet: {
+        net_vmnet_state_t *vmnet = (net_vmnet_state_t *) netdev->op;
+        uint8_t buf[2048];
+        ssize_t plen = net_vmnet_read(vmnet, buf, sizeof(buf));
+
+        if (plen < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+            queue->fd_ready = false;
+            return -1;
+        }
+
+        if (plen < 0) {
+            rv_log_error("virtio-net: could not read packet from vmnet");
+            return -1;
+        }
+
+        struct iovec *cursor = iovs;
+        size_t ncursor = niovs;
+        if (vnet_iovec_write(&cursor, &ncursor, buf, (size_t) plen)) {
+            rv_log_error("virtio-net: vmnet packet too large for RX buffer");
+            return -1;
+        }
+
+        return plen;
+    }
+#else
     case NETDEV_IMPL_tap: {
         net_tap_options_t *tap = (net_tap_options_t *) netdev->op;
         ssize_t plen = readv(tap->tap_fd, iovs, niovs);
@@ -245,6 +281,25 @@ static ssize_t vnet_handle_read(netdev_t *netdev,
 
         return plen;
     }
+#endif
+    case NETDEV_IMPL_user: {
+        net_user_options_t *usr = (net_user_options_t *) netdev->op;
+        ssize_t plen =
+            readv(usr->guest_to_host_channel[SLIRP_READ_SIDE], iovs, niovs);
+
+        if (plen < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+            queue->fd_ready = false;
+            return -1;
+        }
+
+        if (plen < 0) {
+            rv_log_error("virtio-net: could not read packet from SLIRP: %s",
+                         strerror(errno));
+            return -1;
+        }
+
+        return plen;
+    }
     default:
         return -1;
     }
@@ -256,6 +311,19 @@ static ssize_t vnet_handle_write(netdev_t *netdev,
                                  size_t niovs)
 {
     switch (netdev->type) {
+#if defined(__APPLE__)
+    case NETDEV_IMPL_vmnet: {
+        net_vmnet_state_t *vmnet = (net_vmnet_state_t *) netdev->op;
+        ssize_t plen = net_vmnet_writev(vmnet, iovs, niovs);
+
+        if (plen < 0) {
+            queue->fd_ready = false;
+            return -1;
+        }
+
+        return plen;
+    }
+#else
     case NETDEV_IMPL_tap: {
         net_tap_options_t *tap = (net_tap_options_t *) netdev->op;
         ssize_t plen = writev(tap->tap_fd, iovs, niovs);
@@ -267,6 +335,25 @@ static ssize_t vnet_handle_write(netdev_t *netdev,
 
         if (plen < 0) {
             rv_log_error("virtio-net: could not write packet: %s",
+                         strerror(errno));
+            return -1;
+        }
+
+        return plen;
+    }
+#endif
+    case NETDEV_IMPL_user: {
+        net_user_options_t *usr = (net_user_options_t *) netdev->op;
+        ssize_t plen =
+            writev(usr->host_to_guest_channel[SLIRP_WRITE_SIDE], iovs, niovs);
+
+        if (plen < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+            queue->fd_ready = false;
+            return -1;
+        }
+
+        if (plen < 0) {
+            rv_log_error("virtio-net: could not write packet to SLIRP: %s",
                          strerror(errno));
             return -1;
         }
@@ -470,6 +557,26 @@ void virtio_net_refresh_queue(virtio_net_state_t *vnet)
         return;
 
     switch (vnet->peer.type) {
+#if defined(__APPLE__)
+    case NETDEV_IMPL_vmnet: {
+        net_vmnet_state_t *vmnet = (net_vmnet_state_t *) vnet->peer.op;
+        struct pollfd pfd = {
+            .fd = net_vmnet_get_fd(vmnet),
+            .events = POLLIN,
+        };
+
+        poll(&pfd, 1, 0);
+
+        if (pfd.revents & POLLIN) {
+            vnet->queues[VNET_QUEUE_RX].fd_ready = true;
+            virtio_net_try_rx(vnet);
+        }
+
+        vnet->queues[VNET_QUEUE_TX].fd_ready = true;
+        virtio_net_try_tx(vnet);
+        break;
+    }
+#else
     case NETDEV_IMPL_tap: {
         net_tap_options_t *tap = (net_tap_options_t *) vnet->peer.op;
         struct pollfd pfd = {
@@ -487,6 +594,40 @@ void virtio_net_refresh_queue(virtio_net_state_t *vnet)
         if (pfd.revents & POLLOUT) {
             vnet->queues[VNET_QUEUE_TX].fd_ready = true;
             virtio_net_try_tx(vnet);
+        }
+
+        break;
+    }
+#endif
+    case NETDEV_IMPL_user: {
+        net_user_options_t *usr = (net_user_options_t *) vnet->peer.op;
+
+        /* First let SLIRP consume any packets written by guest TX. */
+        net_slirp_poll(usr);
+
+        struct pollfd pfd = {
+            .fd = usr->guest_to_host_channel[SLIRP_READ_SIDE],
+            .events = POLLIN,
+        };
+
+        poll(&pfd, 1, 0);
+        if (pfd.revents & POLLIN) {
+            vnet->queues[VNET_QUEUE_RX].fd_ready = true;
+            virtio_net_try_rx(vnet);
+        }
+
+        /* User-mode backend is memory/socketpair backed; try TX every refresh. */
+        vnet->queues[VNET_QUEUE_TX].fd_ready = true;
+        virtio_net_try_tx(vnet);
+
+        /* A TX packet may synchronously produce a reply through SLIRP. */
+        net_slirp_poll(usr);
+
+        pfd.revents = 0;
+        poll(&pfd, 1, 0);
+        if (pfd.revents & POLLIN) {
+            vnet->queues[VNET_QUEUE_RX].fd_ready = true;
+            virtio_net_try_rx(vnet);
         }
 
         break;
@@ -650,9 +791,14 @@ bool virtio_net_init(virtio_net_state_t *vnet, const char *net_type)
 {
     if (!netdev_init(&vnet->peer, net_type)) {
         rv_log_error("virtio-net: failed to initialize net backend: %s",
-                     net_type ? net_type : "(null)");
+                     net_type ? net_type : "(default)");
         return false;
     }
+
+#if defined(__APPLE__)
+    if (vnet->peer.type == NETDEV_IMPL_vmnet)
+        vnet->queues[VNET_QUEUE_TX].fd_ready = true;
+#endif
 
     return true;
 }

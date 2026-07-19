@@ -38,3 +38,7 @@
 	path = tests/embench-iot
 	url = https://github.com/sysprog21/embench-iot
 	shallow = true
+[submodule "src/minislirp"]
+	path = src/minislirp
+	url = https://github.com/sysprog21/minislirp
+	shallow = true

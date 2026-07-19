@@ -5,21 +5,30 @@
 
 #include "netdev.h"
 
-#include <stdbool.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "utils.h"
 
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
-
-#include <errno.h>
-#include <fcntl.h>
 #include <linux/if.h>
 #include <linux/if_tun.h>
-#include <stdlib.h>
 #include <sys/ioctl.h>
-#include <unistd.h>
+#endif
 
+static void netdev_reset(netdev_t *netdev)
+{
+    if (!netdev)
+        return;
+
+    netdev->name = NULL;
+    netdev->op = NULL;
+}
+
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
 static int net_init_tap(netdev_t *netdev)
 {
     net_tap_options_t *tap = (net_tap_options_t *) netdev->op;
@@ -35,6 +44,7 @@ static int net_init_tap(netdev_t *netdev)
     };
 
     strncpy(ifreq.ifr_name, "tap%d", sizeof(ifreq.ifr_name) - 1);
+    ifreq.ifr_name[sizeof(ifreq.ifr_name) - 1] = '\0';
 
     if (ioctl(tap->tap_fd, TUNSETIFF, &ifreq) < 0) {
         rv_log_error("failed to allocate TAP device: %s", strerror(errno));
@@ -45,8 +55,9 @@ static int net_init_tap(netdev_t *netdev)
 
     rv_log_info("allocated TAP interface: %s", ifreq.ifr_name);
 
-    if (fcntl(tap->tap_fd, F_SETFL,
-              fcntl(tap->tap_fd, F_GETFL, 0) | O_NONBLOCK) < 0) {
+    int flags = fcntl(tap->tap_fd, F_GETFL, 0);
+    if (flags < 0 ||
+        fcntl(tap->tap_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
         rv_log_error("failed to set TAP non-blocking mode: %s",
                      strerror(errno));
         close(tap->tap_fd);
@@ -56,25 +67,123 @@ static int net_init_tap(netdev_t *netdev)
 
     return 0;
 }
+#endif
+
+static int net_init_user(netdev_t *netdev)
+{
+    net_user_options_t *usr = (net_user_options_t *) netdev->op;
+
+    memset(usr, 0, sizeof(*usr));
+    return net_slirp_init(usr);
+}
+
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+static const char *netdev_linux_default(void)
+{
+    return "tap";
+}
+#endif
+
+#if defined(__APPLE__)
+static const char *netdev_macos_default(void)
+{
+    return "vmnet";
+}
+#endif
 
 bool netdev_init(netdev_t *netdev, const char *net_type)
 {
-    if (!netdev || !net_type || strcmp(net_type, "tap"))
+    if (!netdev)
         return false;
 
-    netdev->name = (char *) net_type;
-    netdev->type = NETDEV_IMPL_tap;
-    netdev->op = calloc(1, sizeof(net_tap_options_t));
-    if (!netdev->op)
-        return false;
+    netdev_reset(netdev);
 
-    if (net_init_tap(netdev) < 0) {
+#if defined(__APPLE__)
+    const char *requested = net_type ? net_type : netdev_macos_default();
+
+    if (!strcmp(requested, "vmnet")) {
+        netdev->name = "vmnet";
+        netdev->type = NETDEV_IMPL_vmnet;
+        netdev->op = calloc(1, sizeof(net_vmnet_options_t));
+        if (!netdev->op)
+            return false;
+
+        if (net_vmnet_init(netdev, NET_VMNET_SHARED, NULL) == 0)
+            return true;
+
         free(netdev->op);
         netdev->op = NULL;
-        return false;
+
+        if (net_type) {
+            rv_log_error("failed to initialize vmnet backend; run with sudo or use vnet:user");
+            return false;
+        }
+
+        rv_log_warn("failed to initialize vmnet backend; falling back to user-mode SLIRP");
+        requested = "user";
     }
 
-    return true;
+    if (!strcmp(requested, "user")) {
+        netdev->name = "user";
+        netdev->type = NETDEV_IMPL_user;
+        netdev->op = calloc(1, sizeof(net_user_options_t));
+        if (!netdev->op)
+            return false;
+
+        if (net_init_user(netdev) < 0) {
+            free(netdev->op);
+            netdev->op = NULL;
+            return false;
+        }
+
+        return true;
+    }
+
+    rv_log_error("unsupported virtio-net backend on macOS: %s", requested);
+    return false;
+
+#elif defined(__linux__) && !defined(__EMSCRIPTEN__)
+    const char *requested = net_type ? net_type : netdev_linux_default();
+
+    if (!strcmp(requested, "tap")) {
+        netdev->name = "tap";
+        netdev->type = NETDEV_IMPL_tap;
+        netdev->op = calloc(1, sizeof(net_tap_options_t));
+        if (!netdev->op)
+            return false;
+
+        if (net_init_tap(netdev) < 0) {
+            free(netdev->op);
+            netdev->op = NULL;
+            return false;
+        }
+
+        return true;
+    }
+
+    if (!strcmp(requested, "user")) {
+        netdev->name = "user";
+        netdev->type = NETDEV_IMPL_user;
+        netdev->op = calloc(1, sizeof(net_user_options_t));
+        if (!netdev->op)
+            return false;
+
+        if (net_init_user(netdev) < 0) {
+            free(netdev->op);
+            netdev->op = NULL;
+            return false;
+        }
+
+        return true;
+    }
+
+    rv_log_error("unsupported virtio-net backend on Linux: %s", requested);
+    return false;
+#else
+    (void) net_type;
+    rv_log_error("virtio-net networking is supported only on Linux and macOS hosts");
+    return false;
+#endif
 }
 
 void netdev_delete(netdev_t *netdev)
@@ -83,34 +192,26 @@ void netdev_delete(netdev_t *netdev)
         return;
 
     switch (netdev->type) {
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
     case NETDEV_IMPL_tap: {
         net_tap_options_t *tap = (net_tap_options_t *) netdev->op;
         if (tap->tap_fd >= 0)
             close(tap->tap_fd);
         break;
     }
+#endif
+    case NETDEV_IMPL_user:
+        net_slirp_cleanup((net_user_options_t *) netdev->op);
+        break;
+#if defined(__APPLE__)
+    case NETDEV_IMPL_vmnet:
+        net_vmnet_cleanup((net_vmnet_state_t *) netdev->op);
+        break;
+#endif
     default:
         break;
     }
 
     free(netdev->op);
-    netdev->op = NULL;
+    netdev_reset(netdev);
 }
-
-#else
-
-bool netdev_init(netdev_t *netdev, const char *net_type)
-{
-    (void) netdev;
-    (void) net_type;
-
-    rv_log_error("virtio-net TAP backend is only supported on Linux hosts");
-    return false;
-}
-
-void netdev_delete(netdev_t *netdev)
-{
-    (void) netdev;
-}
-
-#endif

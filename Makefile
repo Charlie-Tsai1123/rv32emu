@@ -228,6 +228,30 @@ include mk/artifact.mk
 include mk/system.mk
 include mk/wasm.mk
 
+ifeq ($(CONFIG_SYSTEM),y)
+MINISLIRP_DIR := src/minislirp
+MINISLIRP_LIB := $(MINISLIRP_DIR)/src/libslirp.a
+MINISLIRP_CFLAGS :=
+
+CFLAGS += -I$(MINISLIRP_DIR)/src
+LDFLAGS += $(MINISLIRP_LIB)
+
+ifeq ($(UNAME_S),Darwin)
+MINISLIRP_CFLAGS := MYCFLAGS="-D_DARWIN_C_SOURCE"
+CFLAGS += -fblocks
+LDFLAGS += -lresolv -framework vmnet
+endif
+
+$(MINISLIRP_DIR)/src/Makefile:
+	$(Q)git submodule update --init $(MINISLIRP_DIR)
+
+$(MINISLIRP_LIB): $(MINISLIRP_DIR)/src/Makefile
+	$(Q)$(MAKE) -C $(dir $<) $(MINISLIRP_CFLAGS)
+
+# Important: make sure libslirp.a is built before linking build/rv32emu.
+$(BIN): $(MINISLIRP_LIB)
+endif
+
 # Build Targets
 DTB_DEPS :=
 ifeq ($(CONFIG_SYSTEM),y)
