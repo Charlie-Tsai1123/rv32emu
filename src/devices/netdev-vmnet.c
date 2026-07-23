@@ -3,7 +3,7 @@
  * "LICENSE" for information on usage and redistribution of this file.
  */
 
- /*
+/*
  * vmnet.framework based network backend for macOS
  *
  * Supports three modes:
@@ -15,9 +15,9 @@
  * entitlement
  */
 
-#if defined(__APPLE__)
-
 #include "netdev.h"
+
+#if RV32EMU_NET_HAS_VMNET
 
 #include <errno.h>
 #include <fcntl.h>
@@ -152,7 +152,8 @@ int net_vmnet_init(netdev_t *netdev,
     }
 
     int flags = fcntl(state->pipe_fds[0], F_GETFL, 0);
-    if (flags < 0 || fcntl(state->pipe_fds[0], F_SETFL, flags | O_NONBLOCK) < 0) {
+    if (flags < 0 ||
+        fcntl(state->pipe_fds[0], F_SETFL, flags | O_NONBLOCK) < 0) {
         rv_log_error("vmnet: failed to set pipe non-blocking mode: %s",
                      strerror(errno));
         close(state->pipe_fds[0]);
@@ -285,7 +286,9 @@ void net_vmnet_cleanup(net_vmnet_state_t *state)
 
     if (state->iface) {
         vmnet_stop_interface((interface_ref) state->iface, state->queue,
-                             ^(vmnet_return_t ret) { (void) ret; });
+                             ^(vmnet_return_t ret) {
+                               (void) ret;
+                             });
         state->iface = NULL;
     }
 
@@ -307,4 +310,4 @@ void net_vmnet_cleanup(net_vmnet_state_t *state)
     pthread_mutex_destroy(&state->lock);
 }
 
-#endif /* defined(__APPLE__) */
+#endif /* RV32EMU_NET_HAS_VMNET */

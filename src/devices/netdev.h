@@ -21,29 +21,51 @@
  * macOS:
  *   - vmnet: vmnet.framework shared/NAT mode
  *   - user : user-mode SLIRP
+ *
+ * WebAssembly/emcc:
+ *   - networking backends are disabled.  In particular, do not build or link
+ *     native SLIRP/vmnet code into the wasm target.
  */
-#if defined(__APPLE__)
-#define NETDEV_SUPPORTED_DEVICES \
-    _(vmnet)                     \
-    _(user)
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+#define RV32EMU_NET_HAS_TAP 1
 #else
-#define NETDEV_SUPPORTED_DEVICES \
-    _(tap)                       \
-    _(user)
+#define RV32EMU_NET_HAS_TAP 0
+#endif
+
+#if (defined(__linux__) || defined(__APPLE__)) && !defined(__EMSCRIPTEN__)
+#define RV32EMU_NET_HAS_SLIRP 1
+#else
+#define RV32EMU_NET_HAS_SLIRP 0
+#endif
+
+#if defined(__APPLE__) && defined(__clang__) && !defined(__EMSCRIPTEN__)
+#define RV32EMU_NET_HAS_VMNET 1
+#else
+#define RV32EMU_NET_HAS_VMNET 0
 #endif
 
 typedef struct netdev netdev_t;
 
 typedef enum {
-#define _(dev) NETDEV_IMPL_##dev,
-    NETDEV_SUPPORTED_DEVICES
-#undef _
+    NETDEV_IMPL_none = 0,
+#if RV32EMU_NET_HAS_TAP
+    NETDEV_IMPL_tap,
+#endif
+#if RV32EMU_NET_HAS_VMNET
+    NETDEV_IMPL_vmnet,
+#endif
+#if RV32EMU_NET_HAS_SLIRP
+    NETDEV_IMPL_user,
+#endif
 } netdev_impl_t;
 
+#if RV32EMU_NET_HAS_TAP
 typedef struct {
     int tap_fd;
 } net_tap_options_t;
+#endif
 
+#if RV32EMU_NET_HAS_SLIRP
 /* user-mode SLIRP backend */
 #define SLIRP_PKT_MAX 16384
 #define SLIRP_READ_SIDE 0
@@ -63,8 +85,9 @@ int net_slirp_init(net_user_options_t *usr);
 void net_slirp_cleanup(net_user_options_t *usr);
 int net_slirp_poll(net_user_options_t *usr);
 int net_slirp_read(net_user_options_t *usr);
+#endif
 
-#if defined(__APPLE__)
+#if RV32EMU_NET_HAS_VMNET
 #include <pthread.h>
 
 typedef enum {

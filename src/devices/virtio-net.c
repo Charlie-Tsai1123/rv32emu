@@ -238,7 +238,7 @@ static ssize_t vnet_handle_read(netdev_t *netdev,
                                 size_t niovs)
 {
     switch (netdev->type) {
-#if defined(__APPLE__)
+#if RV32EMU_NET_HAS_VMNET
     case NETDEV_IMPL_vmnet: {
         net_vmnet_state_t *vmnet = (net_vmnet_state_t *) netdev->op;
         uint8_t buf[2048];
@@ -263,7 +263,8 @@ static ssize_t vnet_handle_read(netdev_t *netdev,
 
         return plen;
     }
-#else
+#endif
+#if RV32EMU_NET_HAS_TAP
     case NETDEV_IMPL_tap: {
         net_tap_options_t *tap = (net_tap_options_t *) netdev->op;
         ssize_t plen = readv(tap->tap_fd, iovs, niovs);
@@ -282,6 +283,7 @@ static ssize_t vnet_handle_read(netdev_t *netdev,
         return plen;
     }
 #endif
+#if RV32EMU_NET_HAS_SLIRP
     case NETDEV_IMPL_user: {
         net_user_options_t *usr = (net_user_options_t *) netdev->op;
         ssize_t plen =
@@ -300,6 +302,7 @@ static ssize_t vnet_handle_read(netdev_t *netdev,
 
         return plen;
     }
+#endif
     default:
         return -1;
     }
@@ -311,7 +314,7 @@ static ssize_t vnet_handle_write(netdev_t *netdev,
                                  size_t niovs)
 {
     switch (netdev->type) {
-#if defined(__APPLE__)
+#if RV32EMU_NET_HAS_VMNET
     case NETDEV_IMPL_vmnet: {
         net_vmnet_state_t *vmnet = (net_vmnet_state_t *) netdev->op;
         ssize_t plen = net_vmnet_writev(vmnet, iovs, niovs);
@@ -323,7 +326,8 @@ static ssize_t vnet_handle_write(netdev_t *netdev,
 
         return plen;
     }
-#else
+#endif
+#if RV32EMU_NET_HAS_TAP
     case NETDEV_IMPL_tap: {
         net_tap_options_t *tap = (net_tap_options_t *) netdev->op;
         ssize_t plen = writev(tap->tap_fd, iovs, niovs);
@@ -342,6 +346,7 @@ static ssize_t vnet_handle_write(netdev_t *netdev,
         return plen;
     }
 #endif
+#if RV32EMU_NET_HAS_SLIRP
     case NETDEV_IMPL_user: {
         net_user_options_t *usr = (net_user_options_t *) netdev->op;
         ssize_t plen =
@@ -360,6 +365,7 @@ static ssize_t vnet_handle_write(netdev_t *netdev,
 
         return plen;
     }
+#endif
     default:
         return -1;
     }
@@ -557,7 +563,7 @@ void virtio_net_refresh_queue(virtio_net_state_t *vnet)
         return;
 
     switch (vnet->peer.type) {
-#if defined(__APPLE__)
+#if RV32EMU_NET_HAS_VMNET
     case NETDEV_IMPL_vmnet: {
         net_vmnet_state_t *vmnet = (net_vmnet_state_t *) vnet->peer.op;
         struct pollfd pfd = {
@@ -576,7 +582,8 @@ void virtio_net_refresh_queue(virtio_net_state_t *vnet)
         virtio_net_try_tx(vnet);
         break;
     }
-#else
+#endif
+#if RV32EMU_NET_HAS_TAP
     case NETDEV_IMPL_tap: {
         net_tap_options_t *tap = (net_tap_options_t *) vnet->peer.op;
         struct pollfd pfd = {
@@ -599,6 +606,7 @@ void virtio_net_refresh_queue(virtio_net_state_t *vnet)
         break;
     }
 #endif
+#if RV32EMU_NET_HAS_SLIRP
     case NETDEV_IMPL_user: {
         net_user_options_t *usr = (net_user_options_t *) vnet->peer.op;
 
@@ -616,7 +624,8 @@ void virtio_net_refresh_queue(virtio_net_state_t *vnet)
             virtio_net_try_rx(vnet);
         }
 
-        /* User-mode backend is memory/socketpair backed; try TX every refresh. */
+        /* User-mode backend is memory/socketpair backed; try TX every refresh.
+         */
         vnet->queues[VNET_QUEUE_TX].fd_ready = true;
         virtio_net_try_tx(vnet);
 
@@ -632,6 +641,7 @@ void virtio_net_refresh_queue(virtio_net_state_t *vnet)
 
         break;
     }
+#endif
     default:
         break;
     }
@@ -795,7 +805,7 @@ bool virtio_net_init(virtio_net_state_t *vnet, const char *net_type)
         return false;
     }
 
-#if defined(__APPLE__)
+#if RV32EMU_NET_HAS_VMNET
     if (vnet->peer.type == NETDEV_IMPL_vmnet)
         vnet->queues[VNET_QUEUE_TX].fd_ready = true;
 #endif

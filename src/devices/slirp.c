@@ -5,6 +5,9 @@
 
 #include "netdev.h"
 
+#if RV32EMU_NET_HAS_SLIRP
+
+
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -319,8 +322,8 @@ void net_slirp_cleanup(net_user_options_t *usr)
 int net_slirp_read(net_user_options_t *usr)
 {
     uint8_t pkt[SLIRP_PKT_MAX];
-    ssize_t plen = recv(usr->host_to_guest_channel[SLIRP_READ_SIDE], pkt,
-                        sizeof(pkt), 0);
+    ssize_t plen =
+        recv(usr->host_to_guest_channel[SLIRP_READ_SIDE], pkt, sizeof(pkt), 0);
 
     if (plen < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -393,3 +396,5 @@ int net_slirp_poll(net_user_options_t *usr)
     slirp_pollfds_poll((Slirp *) usr->slirp, ret < 0, slirp_get_revents, usr);
     return 0;
 }
+
+#endif /* RV32EMU_NET_HAS_SLIRP */

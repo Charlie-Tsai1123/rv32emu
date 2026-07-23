@@ -444,13 +444,21 @@ jobs:
             fi
             bash -c "${BOOT_LINUX_TEST}"
 
-    - name: virtio-net boot test
+    - name: virtio-net user boot test
       if: success() && matrix.compiler == 'gcc' && matrix.boot_type == 'interpreter'
       env:
         CC: ${{ steps.install_cc.outputs.cc }}
         BOOT_TIMEOUT: 60
       run: |
-            .ci/test-netdev.sh
+            .ci/test-netdev.sh user
+
+    - name: virtio-net TAP boot test
+      if: success() && matrix.compiler == 'gcc' && matrix.boot_type == 'interpreter'
+      env:
+        CC: ${{ steps.install_cc.outputs.cc }}
+        BOOT_TIMEOUT: 60
+      run: |
+            .ci/test-netdev.sh tap
 
   # Native AArch64 on GitHub ARM runners - fast, no QEMU overhead
   host-arm64:
@@ -734,7 +742,25 @@ jobs:
              make distclean && make system_defconfig && make INITRD_SIZE=32 $PARALLEL && \
              make artifact $PARALLEL
              bash -c "${BOOT_LINUX_TEST}"
-             make clean
+            #  make clean
+     - name: virtio-net user boot test on macOS
+       if: success()
+       timeout-minutes: 15
+       env:
+         CC: ${{ steps.install_cc.outputs.cc }}
+         BOOT_TIMEOUT: 900
+       run: |
+             .ci/test-netdev.sh user
+ 
+     - name: virtio-net vmnet boot test on macOS
+       if: success() && matrix.compiler == 'clang'
+       continue-on-error: true
+       timeout-minutes: 15
+       env:
+         CC: ${{ steps.install_cc.outputs.cc }}
+         BOOT_TIMEOUT: 900
+       run: |
+             sudo -E .ci/test-netdev.sh vmnet
 
      - name: boot Linux kernel test (JIT)
        if: success()

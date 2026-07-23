@@ -229,6 +229,7 @@ include mk/system.mk
 include mk/wasm.mk
 
 ifeq ($(CONFIG_SYSTEM),y)
+ifneq ($(CC_IS_EMCC),1)
 MINISLIRP_DIR := src/minislirp
 MINISLIRP_LIB := $(MINISLIRP_DIR)/src/libslirp.a
 MINISLIRP_CFLAGS :=
@@ -237,9 +238,14 @@ CFLAGS += -I$(MINISLIRP_DIR)/src
 LDFLAGS += $(MINISLIRP_LIB)
 
 ifeq ($(UNAME_S),Darwin)
+ifeq ($(CC_IS_CLANG),1)
 MINISLIRP_CFLAGS := MYCFLAGS="-D_DARWIN_C_SOURCE"
 CFLAGS += -fblocks
 LDFLAGS += -lresolv -framework vmnet
+else
+MINISLIRP_CFLAGS := MYCFLAGS="-D_DARWIN_C_SOURCE"
+LDFLAGS += -lresolv
+endif
 endif
 
 $(MINISLIRP_DIR)/src/Makefile:
@@ -248,8 +254,8 @@ $(MINISLIRP_DIR)/src/Makefile:
 $(MINISLIRP_LIB): $(MINISLIRP_DIR)/src/Makefile
 	$(Q)$(MAKE) -C $(dir $<) $(MINISLIRP_CFLAGS)
 
-# Important: make sure libslirp.a is built before linking build/rv32emu.
 $(BIN): $(MINISLIRP_LIB)
+endif
 endif
 
 # Build Targets

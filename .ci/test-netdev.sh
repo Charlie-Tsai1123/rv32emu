@@ -14,31 +14,37 @@ if [[ "${backend}" != "user" && "${backend}" != "tap" && "${backend}" != "vmnet"
 fi
 
 case "${backend}" in
-user)
-    guest_ip="10.0.2.15"
-    gateway_ip="10.0.2.2"
-    ;;
-tap)
-    if [[ "${OS_TYPE}" != "Linux" ]]; then
-        print_warning "Skipping TAP virtio-net test on non-Linux host"
-        exit 0
-    fi
-    guest_ip="192.168.100.2"
-    gateway_ip="192.168.100.1"
-    ;;
-vmnet)
-    if [[ "${OS_TYPE}" != "macOS" ]]; then
-        print_warning "Skipping vmnet virtio-net test on non-macOS host"
-        exit 0
-    fi
-    guest_ip="192.168.64.10"
-    gateway_ip="192.168.64.1"
-    ;;
+    user)
+        guest_ip="10.0.2.15"
+        gateway_ip="10.0.2.2"
+        ;;
+    tap)
+        if [[ "${OS_TYPE}" != "Linux" ]]; then
+            print_warning "Skipping TAP virtio-net test on non-Linux host"
+            exit 0
+        fi
+        guest_ip="192.168.100.2"
+        gateway_ip="192.168.100.1"
+        ;;
+    vmnet)
+        if [[ "${OS_TYPE}" != "macOS" ]]; then
+            print_warning "Skipping vmnet virtio-net test on non-macOS host"
+            exit 0
+        fi
+        guest_ip="192.168.64.10"
+        gateway_ip="192.168.64.1"
+        ;;
 esac
 
 register_cleanup cleanup_emulator
 
-TIMEOUT=${BOOT_TIMEOUT:-60}
+if [[ -n "${BOOT_TIMEOUT:-}" ]]; then
+    TIMEOUT="${BOOT_TIMEOUT}"
+elif [[ "${OS_TYPE}" == "macOS" ]]; then
+    TIMEOUT=900
+else
+    TIMEOUT=60
+fi
 
 if [[ "${backend}" == "tap" ]]; then
     spawn_cmd="sudo -E build/rv32emu"
