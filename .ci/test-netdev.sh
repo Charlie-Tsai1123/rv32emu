@@ -27,7 +27,7 @@ case "${backend}" in
         gateway_ip="192.168.100.1"
         ;;
     vmnet)
-        if [[ "${OS_TYPE}" != "macOS" ]]; then
+        if [[ "${OS_TYPE}" != "Darwin" && "${OS_TYPE}" != "macOS" ]]; then
             print_warning "Skipping vmnet virtio-net test on non-macOS host"
             exit 0
         fi
@@ -40,7 +40,7 @@ register_cleanup cleanup_emulator
 
 if [[ -n "${BOOT_TIMEOUT:-}" ]]; then
     TIMEOUT="${BOOT_TIMEOUT}"
-elif [[ "${OS_TYPE}" == "macOS" ]]; then
+elif [[ "${OS_TYPE}" == "Darwin" || "${OS_TYPE}" == "macOS" ]]; then
     TIMEOUT=900
 else
     TIMEOUT=60

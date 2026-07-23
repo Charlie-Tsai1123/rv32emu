@@ -445,7 +445,7 @@ jobs:
             bash -c "${BOOT_LINUX_TEST}"
 
     - name: virtio-net user boot test
-      if: success() && matrix.compiler == 'gcc' && matrix.boot_type == 'interpreter'
+      if: success()
       env:
         CC: ${{ steps.install_cc.outputs.cc }}
         BOOT_TIMEOUT: 60
@@ -453,7 +453,7 @@ jobs:
             .ci/test-netdev.sh user
 
     - name: virtio-net TAP boot test
-      if: success() && matrix.compiler == 'gcc' && matrix.boot_type == 'interpreter'
+      if: success()
       env:
         CC: ${{ steps.install_cc.outputs.cc }}
         BOOT_TIMEOUT: 60
