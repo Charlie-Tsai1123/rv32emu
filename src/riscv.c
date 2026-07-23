@@ -15,6 +15,12 @@
 #if RV32_HAS(SYSTEM_MMIO)
 #include <termios.h>
 #include "dtc/libfdt/libfdt.h"
+
+/* TODO: support WASM target by leveraging -sUSE_ZLIB=1 */
+#if RV32_HAS(LINK_ZLIB)
+#include <zlib.h>
+#endif
+
 #endif
 
 #if !defined(_WIN32) && !defined(_WIN64)
@@ -334,55 +340,147 @@ void rv_destroy_t2c(riscv_t *rv)
 #endif
 
 #if RV32_HAS(SYSTEM_MMIO)
-/* Map a file into memory at the specified location.
- * If max_size > 0, validates that file size does not exceed max_size.
- * Returns the actual file size on success, or -1 when file exceeds max_size
- * (caller handles the error message). Other errors cause program exit.
+
+#if RV32_HAS(LINK_ZLIB)
+/* Helper to check if a file is gzip-compressed by checking its magic number. */
+static bool is_gzip_file(const char *file)
+{
+    FILE *f = fopen(file, "rb");
+    if (!f)
+        return false;
+    unsigned char hdr[2];
+    size_t read_bytes = fread(hdr, 1, 2, f);
+    fclose(f);
+    if (read_bytes == 2) {
+        /* Check magic value */
+        return (hdr[0] == 0x1f && hdr[1] == 0x8b);
+    }
+    return false;
+}
+#endif /* RV32_HAS(LINK_ZLIB) */
+
+/* Load or map a file into memory at the specified RAM location.
+ * If the file is gzip-compressed, it will be decompressed on-the-fly.
+ * If max_size > 0, validates that the file/decompressed size does not exceed
+ * max_size. Returns the file/decompressed size on success, or -1 when it
+ * exceeds max_size (caller handles the error message). Other errors cause
+ * program exit.
  */
 static off_t map_file(char **ram_loc, const char *name, off_t max_size)
 {
-    int fd = open(name, O_RDONLY);
-    if (fd < 0)
-        goto fail;
+    int fd;
+    off_t file_size;
 
-    /* get file size */
-    struct stat st;
-    if (fstat(fd, &st) < 0)
-        goto cleanup;
+#if RV32_HAS(LINK_ZLIB)
+    bool is_gzip_image;
+    gzFile gzfile = NULL;
+    int gzerrno;
+    char *gz_err_str = NULL;
+    off_t dec_buf_off = 0;
+    uint8_t buf[BUFSIZ];
 
-    /* Validate file size if max_size constraint is specified */
-    if (max_size > 0 && st.st_size > max_size) {
-        close(fd);
-        return -1; /* Caller handles the error message */
-    }
+    is_gzip_image = is_gzip_file(name);
+    if (is_gzip_image) {
+        gzfile = gzopen(name, "rb");
+        if (!gzfile)
+            goto fail;
+
+        int bytes_read;
+        while ((bytes_read = gzread(gzfile, buf, sizeof(buf))) > 0) {
+            /* Check overflow for rootfs.cpio.gz */
+            if (max_size > 0 && dec_buf_off + bytes_read > max_size) {
+                gzclose(gzfile);
+                return -1; /* Caller handles the error message */
+            }
+
+            memcpy(*ram_loc + dec_buf_off, buf, bytes_read);
+            dec_buf_off += bytes_read;
+        }
+
+        /*
+         * Z_BUF_ERROR indicates that the input file ended in the middle of a
+         * gzip stream. Note that gzread does not return -1 in the event of an
+         * incomplete gzip stream. This error is deferred until gzclose(), which
+         * will return Z_BUF_ERROR if the last gzread ended in the middle of a
+         * gzip stream.  Alternatively, gzerror can be used before gzclose to
+         * detect this case.
+         *
+         * https://zlib.net/manual.html
+         */
+        const char *tmp_gz_err_str = gzerror(gzfile, &gzerrno);
+        if (gzerrno != Z_OK) {
+            gz_err_str = strdup(tmp_gz_err_str);
+            goto gz_cleanup;
+        }
+
+        gzclose(gzfile);
+        file_size = dec_buf_off;
+
+        *ram_loc += file_size;
+        return file_size;
+    } else
+#endif /* RV32_HAS(LINK_ZLIB) */
+    {
+        fd = open(name, O_RDONLY);
+        if (fd < 0)
+            goto fail;
+
+        /* get file size */
+        struct stat st;
+        if (fstat(fd, &st) < 0)
+            goto cleanup;
+
+        file_size = st.st_size;
+
+        /* Validate file size if max_size constraint is specified */
+        if (max_size > 0 && file_size > max_size) {
+            close(fd);
+            return -1; /* Caller handles the error message */
+        }
 
 #if HAVE_MMAP
-    /* Remap file to memory region. Emscripten/Windows use fallback read path
-     * since they don't support mmap with location hints.
-     */
-    *ram_loc = mmap(*ram_loc, st.st_size, PROT_READ | PROT_WRITE,
-                    MAP_FIXED | MAP_PRIVATE, fd, 0);
-    if (*ram_loc == MAP_FAILED)
-        goto cleanup;
+        /* Remap file to memory region. Emscripten/Windows use fallback read
+         * path since they don't support mmap with location hints.
+         */
+        *ram_loc = mmap(*ram_loc, file_size, PROT_READ | PROT_WRITE,
+                        MAP_FIXED | MAP_PRIVATE, fd, 0);
+        if (*ram_loc == MAP_FAILED)
+            goto cleanup;
 #else
-    if (read(fd, *ram_loc, st.st_size) != st.st_size) {
-        free(*ram_loc);
-        goto cleanup;
+        if (read(fd, *ram_loc, file_size) != file_size) {
+            free(*ram_loc);
+            goto cleanup;
+        }
+#endif /* HAVE_MMAP */
+        close(fd);
     }
-#endif
 
-    /*
-     * The kernel selects a nearby page boundary and attempts to create
-     * the mapping.
-     */
-    *ram_loc += st.st_size;
-    close(fd);
-    return st.st_size;
+    *ram_loc += file_size;
+    return file_size;
 
 cleanup:
     close(fd);
+    goto fail;
+
+#if RV32_HAS(LINK_ZLIB)
+gz_cleanup:
+    gzclose(gzfile);
+    gzfile = NULL;
+#endif
+
 fail:
-    rv_log_fatal("map_file() %s failed: %s", name, strerror(errno));
+    rv_log_fatal(
+        "map_file() %s failed: %s", name,
+#if RV32_HAS(LINK_ZLIB)
+        is_gzip_image ? (gz_err_str ? gz_err_str : "Unknown zlib error") :
+#endif
+                      strerror(errno));
+
+#if RV32_HAS(LINK_ZLIB)
+    if (gz_err_str)
+        free(gz_err_str);
+#endif
+
     exit(EXIT_FAILURE);
 }
 
