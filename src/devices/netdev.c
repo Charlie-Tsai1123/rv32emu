@@ -109,7 +109,8 @@ bool netdev_init(netdev_t *netdev, const char *net_type)
 #if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
     const char *requested = net_type ? net_type : netdev_macos_default();
     if (!requested) {
-        rv_log_error("virtio-net networking is not supported on this macOS build");
+        rv_log_error(
+            "virtio-net networking is not supported on this macOS build");
         return false;
     }
 

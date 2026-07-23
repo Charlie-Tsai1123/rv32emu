@@ -113,6 +113,12 @@ ASSERT expect <<- DONE
             send "x"
             exit 0
         }
+        -re {3 packets transmitted, 0 packets received|3 packets transmitted, 0 received|100% packet loss} {
+            exit 4
+        }
+        "# " {
+            exit 4
+        }
         timeout {
             exit 4
         }

@@ -56,6 +56,30 @@ static void virtio_net_set_fail(virtio_net_state_t *vnet)
         vnet->interrupt_status |= VIRTIO_INT_CONF_CHANGE;
 }
 
+#if RV32EMU_NET_HAS_VMNET
+static bool vnet_mac_is_zero(const uint8_t mac[6])
+{
+    for (int i = 0; i < 6; i++) {
+        if (mac[i])
+            return false;
+    }
+
+    return true;
+}
+#endif
+
+static uint32_t virtio_net_features0(virtio_net_state_t *vnet)
+{
+    uint32_t features = VNET_FEATURES_0 | vnet->device_features;
+
+#if RV32EMU_NET_HAS_VMNET
+    if (vnet->peer.type == NETDEV_IMPL_vmnet)
+        features |= VIRTIO_NET_F_MAC;
+#endif
+
+    return features;
+}
+
 static bool vnet_guest_range_ok(uint64_t addr, uint64_t len)
 {
     if (len == 0)
@@ -716,7 +740,7 @@ uint32_t virtio_net_read(virtio_net_state_t *vnet, uint32_t addr)
         return VIRTIO_VENDOR_ID;
     case _(DeviceFeatures):
         return vnet->device_features_sel == 0
-                   ? VNET_FEATURES_0 | vnet->device_features
+                   ? virtio_net_features0(vnet)
                    : (vnet->device_features_sel == 1 ? VNET_FEATURES_1 : 0);
     case _(QueueNumMax):
         return VNET_QUEUE_NUM_MAX;
@@ -830,8 +854,15 @@ bool virtio_net_init(virtio_net_state_t *vnet, const char *net_type)
     }
 
 #if RV32EMU_NET_HAS_VMNET
-    if (vnet->peer.type == NETDEV_IMPL_vmnet)
+    if (vnet->peer.type == NETDEV_IMPL_vmnet) {
+        virtio_net_config_t *cfg = (virtio_net_config_t *) vnet->priv;
+        net_vmnet_state_t *vmnet = (net_vmnet_state_t *) vnet->peer.op;
+
+        if (!vnet_mac_is_zero(vmnet->mac))
+            memcpy(cfg->mac, vmnet->mac, sizeof(cfg->mac));
+
         vnet->queues[VNET_QUEUE_TX].fd_ready = true;
+    }
 #endif
 
     return true;

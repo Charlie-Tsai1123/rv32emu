@@ -448,7 +448,7 @@ jobs:
       if: success()
       env:
         CC: ${{ steps.install_cc.outputs.cc }}
-        BOOT_TIMEOUT: 60
+        BOOT_TIMEOUT: ${{ matrix.timeout }}
       run: |
             .ci/test-netdev.sh user
 
@@ -456,7 +456,7 @@ jobs:
       if: success()
       env:
         CC: ${{ steps.install_cc.outputs.cc }}
-        BOOT_TIMEOUT: 60
+        BOOT_TIMEOUT: ${{ matrix.timeout }}
       run: |
             .ci/test-netdev.sh tap
 

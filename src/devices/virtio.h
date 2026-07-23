@@ -44,6 +44,7 @@
 #define VIRTIO_RNG_DEV_ID 4
 
 #define VIRTIO_NET_DEV_ID 1
+#define VIRTIO_NET_F_MAC (1U << 5)
 #define IRQ_VNET_BIT(base) (1 << (base))
 
 /* VirtIO MMIO registers */
