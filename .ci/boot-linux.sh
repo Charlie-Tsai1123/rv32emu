@@ -11,6 +11,12 @@ register_cleanup cleanup_emulator
 
 cleanup
 
+# virtio-net tests
+if [[ -n "${VNET_BACKEND:-}" ]]; then
+    (. "${SCRIPT_DIR}/netdev.sh")
+    exit $?
+fi
+
 # RTC tests in a subshell ()
 (. "${SCRIPT_DIR}/rtc.sh")
 RET=$?
