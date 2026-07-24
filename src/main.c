@@ -139,7 +139,7 @@ static void print_usage(const char *filename)
         "(default read and write). This option may be specified "
         "multiple times for multiple block devices\n"
         "  -x vrng : enable virtio-rng device\n"
-        "  -x vnet:<backend>: use <backend> as virtio-net backend interface \n"
+        "  -x vnet:<backend>: use <backend> as virtio-net backend interface\n"
         "  -b <bootargs> : use customized <bootargs> for the kernel\n"
 #endif
         "  -d [filename]: dump registers as JSON to the "
@@ -201,6 +201,11 @@ static bool parse_args(int argc, char **args)
                     return false;
                 }
                 opt_virtio_net_backend = optarg + 5; /* strlen("vnet:") */
+                if (strcmp(opt_virtio_net_backend, "tap")) {
+                    rv_log_error("unsupported virtio-net backend: %s",
+                                 opt_virtio_net_backend);
+                    return false;
+                }
             } else if (!strcmp("vrng", optarg)) {
                 opt_virtio_rng = true;
             } else {

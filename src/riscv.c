@@ -598,7 +598,6 @@ void load_dtb(char **ram_loc, vm_attr_t *attr)
             uint32_t irq = cpu_to_fdt32(new_irq);
             assert(fdt_setprop(dtb_buf, subnode, "interrupts", &irq,
                                sizeof(irq)) == 0);
-            dev_idx++;
         }
     }
 
