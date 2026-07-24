@@ -8,8 +8,8 @@ check_platform
 
 backend="${1:-user}"
 
-if [[ "${backend}" != "user" && "${backend}" != "tap" && "${backend}" != "vmnet" ]]; then
-    print_error "Usage: $0 [user|tap|vmnet]"
+if [[ "${backend}" != "user" && "${backend}" != "tap" ]]; then
+    print_error "Usage: $0 [user|tap]"
     exit 2
 fi
 
@@ -26,14 +26,6 @@ case "${backend}" in
         guest_ip="192.168.100.2"
         gateway_ip="192.168.100.1"
         ;;
-    vmnet)
-        if [[ "${OS_TYPE}" != "Darwin" && "${OS_TYPE}" != "macOS" ]]; then
-            print_warning "Skipping vmnet virtio-net test on non-macOS host"
-            exit 0
-        fi
-        guest_ip="192.168.64.10"
-        gateway_ip="192.168.64.1"
-        ;;
 esac
 
 register_cleanup cleanup_emulator
@@ -47,8 +39,6 @@ else
 fi
 
 if [[ "${backend}" == "tap" ]]; then
-    spawn_cmd="sudo -E build/rv32emu"
-elif [[ "${backend}" == "vmnet" ]]; then
     spawn_cmd="sudo -E build/rv32emu"
 else
     spawn_cmd="build/rv32emu"

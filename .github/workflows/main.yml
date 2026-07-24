@@ -751,17 +751,7 @@ jobs:
          BOOT_TIMEOUT: 900
        run: |
              .ci/test-netdev.sh user
- 
-     - name: virtio-net vmnet boot test on macOS
-       if: success() && matrix.compiler == 'clang'
-       continue-on-error: true
-       timeout-minutes: 15
-       env:
-         CC: ${{ steps.install_cc.outputs.cc }}
-         BOOT_TIMEOUT: 900
-       run: |
-             sudo -E .ci/test-netdev.sh vmnet
-
+     
      - name: boot Linux kernel test (JIT)
        if: success()
        env:

@@ -238,14 +238,8 @@ CFLAGS += -I$(MINISLIRP_DIR)/src
 LDFLAGS += $(MINISLIRP_LIB)
 
 ifeq ($(UNAME_S),Darwin)
-ifeq ($(CC_IS_CLANG),1)
-MINISLIRP_CFLAGS := MYCFLAGS="-D_DARWIN_C_SOURCE"
-CFLAGS += -fblocks
-LDFLAGS += -lresolv -framework vmnet
-else
 MINISLIRP_CFLAGS := MYCFLAGS="-D_DARWIN_C_SOURCE"
 LDFLAGS += -lresolv
-endif
 endif
 
 $(MINISLIRP_DIR)/src/Makefile:

@@ -56,30 +56,6 @@ static void virtio_net_set_fail(virtio_net_state_t *vnet)
         vnet->interrupt_status |= VIRTIO_INT_CONF_CHANGE;
 }
 
-#if RV32EMU_NET_HAS_VMNET
-static bool vnet_mac_is_zero(const uint8_t mac[6])
-{
-    for (int i = 0; i < 6; i++) {
-        if (mac[i])
-            return false;
-    }
-
-    return true;
-}
-#endif
-
-static uint32_t virtio_net_features0(virtio_net_state_t *vnet)
-{
-    uint32_t features = VNET_FEATURES_0 | vnet->device_features;
-
-#if RV32EMU_NET_HAS_VMNET
-    if (vnet->peer.type == NETDEV_IMPL_vmnet)
-        features |= VIRTIO_NET_F_MAC;
-#endif
-
-    return features;
-}
-
 static bool vnet_guest_range_ok(uint64_t addr, uint64_t len)
 {
     if (len == 0)
@@ -263,33 +239,6 @@ static ssize_t vnet_handle_read(netdev_t *netdev,
                                 size_t niovs)
 {
     switch (netdev->type) {
-#if RV32EMU_NET_HAS_VMNET
-    case NETDEV_IMPL_vmnet: {
-        net_vmnet_state_t *vmnet = (net_vmnet_state_t *) netdev->op;
-        uint8_t buf[2048];
-        ssize_t plen = net_vmnet_read(vmnet, buf, sizeof(buf));
-
-        if (plen < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
-            queue->fd_ready = false;
-            return -1;
-        }
-
-        if (plen < 0) {
-            rv_log_error("virtio-net: could not read packet from vmnet");
-            return -1;
-        }
-
-        struct iovec *cursor = iovs;
-        size_t ncursor = niovs;
-        if (vnet_iovec_write(&cursor, &ncursor, buf, (size_t) plen)) {
-            rv_log_error("virtio-net: vmnet packet too large for RX buffer");
-            return -1;
-        }
-
-        return plen;
-    }
-#endif
-
 #if RV32EMU_NET_HAS_TAP
     case NETDEV_IMPL_tap: {
         net_tap_options_t *tap = (net_tap_options_t *) netdev->op;
@@ -342,20 +291,6 @@ static ssize_t vnet_handle_write(netdev_t *netdev,
                                  size_t niovs)
 {
     switch (netdev->type) {
-#if RV32EMU_NET_HAS_VMNET
-    case NETDEV_IMPL_vmnet: {
-        net_vmnet_state_t *vmnet = (net_vmnet_state_t *) netdev->op;
-        ssize_t plen = net_vmnet_writev(vmnet, iovs, niovs);
-
-        if (plen < 0) {
-            queue->fd_ready = false;
-            return -1;
-        }
-
-        return plen;
-    }
-#endif
-
 #if RV32EMU_NET_HAS_TAP
     case NETDEV_IMPL_tap: {
         net_tap_options_t *tap = (net_tap_options_t *) netdev->op;
@@ -605,27 +540,6 @@ void virtio_net_refresh_queue(virtio_net_state_t *vnet)
         return;
 
     switch (vnet->peer.type) {
-#if RV32EMU_NET_HAS_VMNET
-    case NETDEV_IMPL_vmnet: {
-        net_vmnet_state_t *vmnet = (net_vmnet_state_t *) vnet->peer.op;
-        struct pollfd pfd = {
-            .fd = net_vmnet_get_fd(vmnet),
-            .events = POLLIN,
-        };
-
-        poll(&pfd, 1, 0);
-
-        if (pfd.revents & POLLIN) {
-            vnet->queues[VNET_QUEUE_RX].fd_ready = true;
-            virtio_net_try_rx(vnet);
-        }
-
-        vnet->queues[VNET_QUEUE_TX].fd_ready = true;
-        virtio_net_try_tx(vnet);
-        break;
-    }
-#endif
-
 #if RV32EMU_NET_HAS_TAP
     case NETDEV_IMPL_tap: {
         net_tap_options_t *tap = (net_tap_options_t *) vnet->peer.op;
@@ -740,7 +654,7 @@ uint32_t virtio_net_read(virtio_net_state_t *vnet, uint32_t addr)
         return VIRTIO_VENDOR_ID;
     case _(DeviceFeatures):
         return vnet->device_features_sel == 0
-                   ? virtio_net_features0(vnet)
+                   ? VNET_FEATURES_0 | vnet->device_features
                    : (vnet->device_features_sel == 1 ? VNET_FEATURES_1 : 0);
     case _(QueueNumMax):
         return VNET_QUEUE_NUM_MAX;
@@ -852,18 +766,6 @@ bool virtio_net_init(virtio_net_state_t *vnet, const char *net_type)
                      net_type ? net_type : "(default)");
         return false;
     }
-
-#if RV32EMU_NET_HAS_VMNET
-    if (vnet->peer.type == NETDEV_IMPL_vmnet) {
-        virtio_net_config_t *cfg = (virtio_net_config_t *) vnet->priv;
-        net_vmnet_state_t *vmnet = (net_vmnet_state_t *) vnet->peer.op;
-
-        if (!vnet_mac_is_zero(vmnet->mac))
-            memcpy(cfg->mac, vmnet->mac, sizeof(cfg->mac));
-
-        vnet->queues[VNET_QUEUE_TX].fd_ready = true;
-    }
-#endif
 
     return true;
 }
