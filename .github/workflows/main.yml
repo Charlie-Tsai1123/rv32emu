@@ -444,8 +444,17 @@ jobs:
             fi
             bash -c "${BOOT_LINUX_TEST}"
 
+    - name: virtio-net user boot test
+      if: success() && matrix.boot_type == 'interpreter'
+      env:
+        CC: ${{ steps.install_cc.outputs.cc }}
+        BOOT_TIMEOUT: ${{ matrix.timeout }}
+        VNET_BACKEND: user
+      run: |
+            bash -c "${BOOT_LINUX_TEST}"
+
     - name: virtio-net TAP boot test
-      if: success()
+      if: success() && matrix.boot_type == 'interpreter'
       env:
         CC: ${{ steps.install_cc.outputs.cc }}
         BOOT_TIMEOUT: ${{ matrix.timeout }}
@@ -735,7 +744,17 @@ jobs:
              make distclean && make system_defconfig && make INITRD_SIZE=32 $PARALLEL && \
              make artifact $PARALLEL
              bash -c "${BOOT_LINUX_TEST}"
-             make clean
+
+     - name: virtio-net user boot test on macOS
+       if: success()
+       timeout-minutes: 15
+       env:
+         CC: ${{ steps.install_cc.outputs.cc }}
+         BOOT_TIMEOUT: 900
+         VNET_BACKEND: user
+       run: |
+            bash -c "${BOOT_LINUX_TEST}"
+            make clean
 
      - name: boot Linux kernel test (JIT)
        if: success()
