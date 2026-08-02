@@ -444,24 +444,6 @@ jobs:
             fi
             bash -c "${BOOT_LINUX_TEST}"
 
-    - name: virtio-net user boot test
-      if: success() && matrix.boot_type == 'interpreter'
-      env:
-        CC: ${{ steps.install_cc.outputs.cc }}
-        BOOT_TIMEOUT: ${{ matrix.timeout }}
-        VNET_BACKEND: user
-      run: |
-            bash -c "${BOOT_LINUX_TEST}"
-
-    - name: virtio-net TAP boot test
-      if: success() && matrix.boot_type == 'interpreter'
-      env:
-        CC: ${{ steps.install_cc.outputs.cc }}
-        BOOT_TIMEOUT: ${{ matrix.timeout }}
-        VNET_BACKEND: tap
-      run: |
-            bash -c "${BOOT_LINUX_TEST}"
-
   # Native AArch64 on GitHub ARM runners - fast, no QEMU overhead
   host-arm64:
     needs: [detect-code-related-file-changes]
@@ -498,7 +480,7 @@ jobs:
             sudo apt-get install -q=2 -y make curl wget libsdl2-dev libsdl2-mixer-dev \
                  lsb-release software-properties-common gnupg bc device-tree-compiler expect p7zip-full e2fsprogs || {
               echo "WARNING: Some packages failed, retrying critical ones..."
-              sudo apt-get install -q=2 -y --no-download make curl wget expect bc device-tree-compiler p7zip-full e2fsprogs || true
+              sudo apt-get install -q=2 -y --no-download make curl wget || true
             }
 
     - name: Install LLVM
@@ -579,6 +561,7 @@ jobs:
     runs-on: macos-latest # M1 chip
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      NETDEV_BOOT_TIMEOUT: 900
     steps:
      - uses: actions/checkout@v6
        with:
@@ -744,17 +727,7 @@ jobs:
              make distclean && make system_defconfig && make INITRD_SIZE=32 $PARALLEL && \
              make artifact $PARALLEL
              bash -c "${BOOT_LINUX_TEST}"
-
-     - name: virtio-net user boot test on macOS
-       if: success()
-       timeout-minutes: 15
-       env:
-         CC: ${{ steps.install_cc.outputs.cc }}
-         BOOT_TIMEOUT: 900
-         VNET_BACKEND: user
-       run: |
-            bash -c "${BOOT_LINUX_TEST}"
-            make clean
+             make clean
 
      - name: boot Linux kernel test (JIT)
        if: success()

@@ -37,7 +37,7 @@ esac
 
 register_cleanup cleanup_emulator
 
-TIMEOUT=${BOOT_TIMEOUT:-60}
+TIMEOUT=${NETDEV_BOOT_TIMEOUT:-${BOOT_TIMEOUT:-60}}
 
 COLOR_G='\e[32;01m' # Green
 COLOR_R='\e[31;01m' # Red
