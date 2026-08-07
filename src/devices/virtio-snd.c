@@ -263,7 +263,6 @@ typedef struct {
 } virtio_snd_chmap_info_t;
 
 typedef struct {
-    pthread_cond_t readable;
     pthread_cond_t writable;
     int buf_ev_notify;
     bool releasing;
@@ -454,7 +453,6 @@ static void vsnd_reset_stream(virtio_snd_prop_t *props)
 {
     pthread_mutex_lock(&props->lock.lock);
     props->lock.releasing = true;
-    pthread_cond_broadcast(&props->lock.readable);
     pthread_cond_broadcast(&props->lock.writable);
     pthread_mutex_unlock(&props->lock.lock);
 
@@ -694,7 +692,6 @@ static uint32_t virtio_snd_pcm_prepare(virtio_snd_state_t *vsnd,
 
     pthread_mutex_lock(&props->lock.lock);
     props->lock.releasing = true;
-    pthread_cond_broadcast(&props->lock.readable);
     pthread_cond_broadcast(&props->lock.writable);
     pthread_mutex_unlock(&props->lock.lock);
 
@@ -846,7 +843,6 @@ static uint32_t virtio_snd_pcm_release(virtio_snd_state_t *vsnd,
      */
     pthread_mutex_lock(&props->lock.lock);
     props->lock.releasing = true;
-    pthread_cond_broadcast(&props->lock.readable);
     pthread_cond_broadcast(&props->lock.writable);
     vsnd_clear_buf_queue(props);
     props->lock.buf_ev_notify = 0;
@@ -937,11 +933,10 @@ static int virtio_snd_stream_cb(const void *input,
 
     pthread_mutex_lock(&props->lock.lock);
 
-    while (props->lock.buf_ev_notify < 1 && !props->lock.releasing)
-        pthread_cond_wait(&props->lock.readable, &props->lock.lock);
-
-    if (props->lock.releasing) {
+    if (props->lock.releasing ||
+        props->lock.buf_ev_notify < 1) {
         pthread_mutex_unlock(&props->lock.lock);
+
         memset(output, 0, out_bytes);
         return paContinue;
     }
@@ -1075,7 +1070,7 @@ static int virtio_snd_tx_desc_handler(virtio_snd_state_t *vsnd,
         pthread_mutex_lock(&props->lock.lock);
         if (!props->lock.releasing) {
             props->lock.buf_ev_notify++;
-            pthread_cond_signal(&props->lock.readable);
+            
         }
         pthread_mutex_unlock(&props->lock.lock);
     }
@@ -1567,13 +1562,7 @@ static bool vsnd_init_prop(virtio_snd_prop_t *props)
     if (pthread_mutex_init(&props->lock.lock, NULL))
         return false;
 
-    if (pthread_cond_init(&props->lock.readable, NULL)) {
-        pthread_mutex_destroy(&props->lock.lock);
-        return false;
-    }
-
     if (pthread_cond_init(&props->lock.writable, NULL)) {
-        pthread_cond_destroy(&props->lock.readable);
         pthread_mutex_destroy(&props->lock.lock);
         return false;
     }
@@ -1585,7 +1574,6 @@ static bool vsnd_init_prop(virtio_snd_prop_t *props)
 static void vsnd_destroy_prop(virtio_snd_prop_t *props)
 {
     vsnd_reset_stream(props);
-    pthread_cond_destroy(&props->lock.readable);
     pthread_cond_destroy(&props->lock.writable);
     pthread_mutex_destroy(&props->lock.lock);
 }
