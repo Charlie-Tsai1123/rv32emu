@@ -25,8 +25,6 @@
 #define VSND_QUEUE (vsnd->queues[vsnd->queue_sel])
 
 #define VSND_CNFA_FRAME_SZ 2 /* S16 = 2 bytes per sample */
-/* Start host playback only after at least two guest periods are queued. */
-#define VSND_PREBUFFER_PERIODS 2U
 
 enum {
     VSND_QUEUE_CTRL = 0,
@@ -296,15 +294,6 @@ typedef struct {
     virtio_snd_pcm_set_params_t pp;
     PaStream *pa_stream;
 
-    /*
-     * PortAudio control calls may come from the control queue and the TX
-     * worker. Serialize START/STOP/CLOSE without holding the PCM queue lock,
-     * because Pa_StartStream() may invoke the callback before it returns.
-     */
-    pthread_mutex_t pa_lock;
-    bool start_requested;
-    bool pa_started;
-
     virtio_snd_queue_lock_t lock;
     vsnd_buf_queue_node_t *buf_head;
     vsnd_buf_queue_node_t *buf_tail;
@@ -353,7 +342,6 @@ static void virtio_queue_notify_handler(virtio_snd_state_t *vsnd, int index);
 static void virtio_snd_process_tx_queue(virtio_snd_state_t *vsnd);
 static void vsnd_cancel_pending_and_wait(virtio_snd_prop_t *props);
 static void *virtio_snd_completion_thread(void *arg);
-static PaError vsnd_maybe_start_pa_stream(virtio_snd_prop_t *props);
 
 static inline virtio_snd_priv_t *vsnd_priv(virtio_snd_state_t *vsnd)
 {
@@ -368,72 +356,6 @@ static inline uint32_t vsnd_min(uint32_t a, uint32_t b)
 static bool vsnd_stream_accepts_tx(uint32_t code)
 {
     return code == VIRTIO_SND_R_PCM_PREPARE || code == VIRTIO_SND_R_PCM_START;
-}
-
-
-static size_t vsnd_prebuffer_target_locked(const virtio_snd_prop_t *props)
-{
-    size_t period_bytes = props->pp.period_bytes;
-    size_t buffer_bytes = props->pp.buffer_bytes;
-
-    if (!period_bytes)
-        period_bytes =
-            (props->pp.channels ? props->pp.channels : 1U) * VSND_CNFA_FRAME_SZ;
-
-    size_t target = period_bytes * VSND_PREBUFFER_PERIODS;
-    if (target < period_bytes)
-        target = SIZE_MAX;
-
-    if (buffer_bytes && target > buffer_bytes)
-        target = buffer_bytes;
-
-    return target ? target : period_bytes;
-}
-
-/*
- * Start PortAudio only when the guest has supplied enough complete PCM
- * periods. This avoids beginning with an empty callback, which otherwise
- * inserts silence/noise and is especially fragile with a two-period ALSA
- * buffer.
- */
-static PaError vsnd_maybe_start_pa_stream(virtio_snd_prop_t *props)
-{
-    PaError err = paNoError;
-
-    pthread_mutex_lock(&props->pa_lock);
-
-    pthread_mutex_lock(&props->lock.lock);
-    size_t target = vsnd_prebuffer_target_locked(props);
-    bool ready = props->start_requested && !props->pa_started &&
-                 !props->lock.releasing &&
-                 props->pp.hdr.hdr.code == VIRTIO_SND_R_PCM_START &&
-                 props->pa_stream && props->lock.pending_pcm_bytes >= target;
-    PaStream *stream = props->pa_stream;
-    pthread_mutex_unlock(&props->lock.lock);
-
-    if (!ready) {
-        pthread_mutex_unlock(&props->pa_lock);
-        return paNoError;
-    }
-
-    int active = Pa_IsStreamActive(stream);
-    if (active < 0) {
-        err = (PaError) active;
-    } else if (active == 0) {
-        err = Pa_StartStream(stream);
-    }
-
-    pthread_mutex_lock(&props->lock.lock);
-    if (err == paNoError && props->start_requested && !props->lock.releasing &&
-        props->pp.hdr.hdr.code == VIRTIO_SND_R_PCM_START) {
-        props->pa_started = true;
-    } else if (err != paNoError) {
-        props->pa_started = false;
-    }
-    pthread_mutex_unlock(&props->lock.lock);
-
-    pthread_mutex_unlock(&props->pa_lock);
-    return err;
 }
 
 
@@ -606,23 +528,17 @@ static void vsnd_reset_stream(virtio_snd_prop_t *props)
 {
     pthread_mutex_lock(&props->lock.lock);
     props->lock.releasing = true;
-    props->start_requested = false;
-    props->pa_started = false;
     pthread_mutex_unlock(&props->lock.lock);
 
-    pthread_mutex_lock(&props->pa_lock);
     if (props->pa_stream && Pa_IsStreamActive(props->pa_stream) == 1)
         Pa_AbortStream(props->pa_stream);
-    pthread_mutex_unlock(&props->pa_lock);
 
     vsnd_cancel_pending_and_wait(props);
 
-    pthread_mutex_lock(&props->pa_lock);
     if (props->pa_stream) {
         Pa_CloseStream(props->pa_stream);
         props->pa_stream = NULL;
     }
-    pthread_mutex_unlock(&props->pa_lock);
 
     pthread_mutex_lock(&props->lock.lock);
     memset(&props->pp, 0, sizeof(props->pp));
@@ -981,23 +897,17 @@ static uint32_t virtio_snd_pcm_prepare(virtio_snd_state_t *vsnd,
 
     pthread_mutex_lock(&props->lock.lock);
     props->lock.releasing = true;
-    props->start_requested = false;
-    props->pa_started = false;
     pthread_mutex_unlock(&props->lock.lock);
 
-    pthread_mutex_lock(&props->pa_lock);
     if (props->pa_stream && Pa_IsStreamActive(props->pa_stream) == 1)
         Pa_AbortStream(props->pa_stream);
-    pthread_mutex_unlock(&props->pa_lock);
 
     vsnd_cancel_pending_and_wait(props);
 
-    pthread_mutex_lock(&props->pa_lock);
     if (props->pa_stream) {
         Pa_CloseStream(props->pa_stream);
         props->pa_stream = NULL;
     }
-    pthread_mutex_unlock(&props->pa_lock);
     props->v.stream_id = stream_id;
 
     uint32_t channels = props->pp.channels;
@@ -1030,8 +940,6 @@ static uint32_t virtio_snd_pcm_prepare(virtio_snd_state_t *vsnd,
 
     pthread_mutex_lock(&props->lock.lock);
     props->lock.releasing = false;
-    props->start_requested = false;
-    props->pa_started = false;
     props->pp.hdr.hdr.code = VIRTIO_SND_R_PCM_PREPARE;
     pthread_mutex_unlock(&props->lock.lock);
     *payload_len = 0;
@@ -1040,8 +948,6 @@ static uint32_t virtio_snd_pcm_prepare(virtio_snd_state_t *vsnd,
 prepare_failed:
     pthread_mutex_lock(&props->lock.lock);
     props->lock.releasing = false;
-    props->start_requested = false;
-    props->pa_started = false;
     props->pp.hdr.hdr.code = VIRTIO_SND_R_PCM_SET_PARAMS;
     pthread_mutex_unlock(&props->lock.lock);
     return VIRTIO_SND_S_IO_ERR;
@@ -1062,7 +968,6 @@ static uint32_t virtio_snd_pcm_start(virtio_snd_state_t *vsnd,
     uint32_t code = props->pp.hdr.hdr.code;
     if (code == VIRTIO_SND_R_PCM_PREPARE || code == VIRTIO_SND_R_PCM_STOP) {
         props->lock.releasing = false;
-        props->start_requested = true;
         props->pp.hdr.hdr.code = VIRTIO_SND_R_PCM_START;
     }
     pthread_mutex_unlock(&props->lock.lock);
@@ -1072,21 +977,26 @@ static uint32_t virtio_snd_pcm_start(virtio_snd_state_t *vsnd,
     if (!props->pa_stream)
         return VIRTIO_SND_S_IO_ERR;
 
-    /*
-     * If the TX queue is already primed, playback starts here. Otherwise START
-     * still succeeds and the TX thread starts PortAudio as soon as enough PCM
-     * has arrived.
-     */
-    PaError err = vsnd_maybe_start_pa_stream(props);
-    if (err != paNoError) {
-        rv_log_error("virtio-snd: Pa_StartStream failed: %s",
-                     Pa_GetErrorText(err));
+    int active = Pa_IsStreamActive(props->pa_stream);
+    if (active < 0) {
+        rv_log_error("virtio-snd: Pa_IsStreamActive failed: %s",
+                     Pa_GetErrorText(active));
         pthread_mutex_lock(&props->lock.lock);
-        props->start_requested = false;
-        props->pa_started = false;
-        props->pp.hdr.hdr.code = VIRTIO_SND_R_PCM_PREPARE;
+        props->pp.hdr.hdr.code = code;
         pthread_mutex_unlock(&props->lock.lock);
         return VIRTIO_SND_S_IO_ERR;
+    }
+
+    if (active == 0) {
+        PaError err = Pa_StartStream(props->pa_stream);
+        if (err != paNoError) {
+            rv_log_error("virtio-snd: Pa_StartStream failed: %s",
+                         Pa_GetErrorText(err));
+            pthread_mutex_lock(&props->lock.lock);
+            props->pp.hdr.hdr.code = code;
+            pthread_mutex_unlock(&props->lock.lock);
+            return VIRTIO_SND_S_IO_ERR;
+        }
     }
 
     *payload_len = 0;
@@ -1105,11 +1015,8 @@ static uint32_t virtio_snd_pcm_stop(virtio_snd_state_t *vsnd,
 
     pthread_mutex_lock(&props->lock.lock);
     uint32_t code = props->pp.hdr.hdr.code;
-    if (code == VIRTIO_SND_R_PCM_START) {
+    if (code == VIRTIO_SND_R_PCM_START)
         props->pp.hdr.hdr.code = VIRTIO_SND_R_PCM_STOP;
-        props->start_requested = false;
-        props->pa_started = false;
-    }
     pthread_mutex_unlock(&props->lock.lock);
     if (code != VIRTIO_SND_R_PCM_START)
         return VIRTIO_SND_S_BAD_MSG;
@@ -1117,13 +1024,11 @@ static uint32_t virtio_snd_pcm_stop(virtio_snd_state_t *vsnd,
         return VIRTIO_SND_S_IO_ERR;
 
     PaError err = paNoError;
-    pthread_mutex_lock(&props->pa_lock);
     int active = Pa_IsStreamActive(props->pa_stream);
     if (active < 0)
         err = (PaError) active;
     else if (active == 1)
         err = Pa_AbortStream(props->pa_stream);
-    pthread_mutex_unlock(&props->pa_lock);
     if (err != paNoError) {
         rv_log_error("PortAudio Pa_AbortStream failed: %s",
                      Pa_GetErrorText(err));
@@ -1149,15 +1054,12 @@ static uint32_t virtio_snd_pcm_release(virtio_snd_state_t *vsnd,
         code == VIRTIO_SND_R_PCM_START) {
         props->pp.hdr.hdr.code = VIRTIO_SND_R_PCM_RELEASE;
         props->lock.releasing = true;
-        props->start_requested = false;
-        props->pa_started = false;
     }
     pthread_mutex_unlock(&props->lock.lock);
     if (code != VIRTIO_SND_R_PCM_PREPARE && code != VIRTIO_SND_R_PCM_STOP &&
         code != VIRTIO_SND_R_PCM_START)
         return VIRTIO_SND_S_BAD_MSG;
 
-    pthread_mutex_lock(&props->pa_lock);
     if (props->pa_stream) {
         int active = Pa_IsStreamActive(props->pa_stream);
         if (active == 1) {
@@ -1170,11 +1072,9 @@ static uint32_t virtio_snd_pcm_release(virtio_snd_state_t *vsnd,
                          Pa_GetErrorText(active));
         }
     }
-    pthread_mutex_unlock(&props->pa_lock);
 
     vsnd_cancel_pending_and_wait(props);
 
-    pthread_mutex_lock(&props->pa_lock);
     if (props->pa_stream) {
         PaError err = Pa_CloseStream(props->pa_stream);
         if (err != paNoError)
@@ -1182,7 +1082,6 @@ static uint32_t virtio_snd_pcm_release(virtio_snd_state_t *vsnd,
                          Pa_GetErrorText(err));
         props->pa_stream = NULL;
     }
-    pthread_mutex_unlock(&props->pa_lock);
     *payload_len = 0;
     return VIRTIO_SND_S_OK;
 }
@@ -1360,15 +1259,6 @@ static int virtio_snd_tx_desc_handler(virtio_snd_state_t *vsnd,
         pthread_cond_signal(&props->lock.completed);
     }
     pthread_mutex_unlock(&props->lock.lock);
-
-    /*
-     * START may have arrived before the guest submitted enough playback data.
-     * Begin host playback now once the prebuffer threshold has been reached.
-     */
-    PaError start_err = vsnd_maybe_start_pa_stream(props);
-    if (start_err != paNoError)
-        rv_log_error("virtio-snd: deferred Pa_StartStream failed: %s",
-                     Pa_GetErrorText(start_err));
 
     return 0;
 }
@@ -1803,21 +1693,15 @@ void virtio_snd_write(virtio_snd_state_t *vsnd, uint32_t addr, uint32_t value)
 static bool vsnd_init_prop(virtio_snd_prop_t *props)
 {
     memset(props, 0, sizeof(*props));
-    if (pthread_mutex_init(&props->pa_lock, NULL))
+    if (pthread_mutex_init(&props->lock.lock, NULL))
         return false;
-    if (pthread_mutex_init(&props->lock.lock, NULL)) {
-        pthread_mutex_destroy(&props->pa_lock);
-        return false;
-    }
     if (pthread_cond_init(&props->lock.completed, NULL)) {
         pthread_mutex_destroy(&props->lock.lock);
-        pthread_mutex_destroy(&props->pa_lock);
         return false;
     }
     if (pthread_cond_init(&props->lock.all_completed, NULL)) {
         pthread_cond_destroy(&props->lock.completed);
         pthread_mutex_destroy(&props->lock.lock);
-        pthread_mutex_destroy(&props->pa_lock);
         return false;
     }
 
@@ -1845,7 +1729,6 @@ static void vsnd_destroy_prop(virtio_snd_prop_t *props)
     pthread_cond_destroy(&props->lock.completed);
     pthread_cond_destroy(&props->lock.all_completed);
     pthread_mutex_destroy(&props->lock.lock);
-    pthread_mutex_destroy(&props->pa_lock);
 }
 
 bool virtio_snd_init(virtio_snd_state_t *vsnd)
