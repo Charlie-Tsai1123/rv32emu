@@ -368,6 +368,8 @@ static bool is_gzip_file(const char *file)
  */
 static off_t map_file(char **ram_loc, const char *name, off_t max_size)
 {
+    assert(max_size > 0);
+
     int fd;
     off_t file_size;
 
@@ -1224,10 +1226,23 @@ void rv_delete(riscv_t *rv)
  */
 static void load_boot_images(vm_attr_t *attr)
 {
+    assert(attr->mem->mem_size >=
+           (DTB_SIZE + (attr->data.system.initrd ? INITRD_SIZE : 0)));
+
     /* Load kernel at the beginning of memory */
     char *ram_loc = (char *) attr->mem->mem_base;
-    map_file(&ram_loc, attr->data.system.kernel, 0);
-    rv_log_info("Kernel loaded");
+    off_t kernel_size = attr->mem->mem_size - DTB_SIZE -
+                        (attr->data.system.initrd ? INITRD_SIZE : 0);
+    off_t ret;
+
+    ret = map_file(&ram_loc, attr->data.system.kernel, kernel_size);
+    if (ret < 0) {
+        /* map_file returns -1 when file exceeds max_size */
+        rv_log_fatal("Kernel image exceeds max size (%ld MiB).\n",
+                     (long) kernel_size / (1024 * 1024));
+        exit(EXIT_FAILURE);
+    }
+    rv_log_info("Kernel loaded (%ld bytes)", (long) ret);
 
     /* Load DTB at the end of memory */
     attr->dtb_addr = attr->mem->mem_size - DTB_SIZE;
@@ -1246,9 +1261,8 @@ static void load_boot_images(vm_attr_t *attr)
         }
         uint32_t initrd_addr = attr->dtb_addr - INITRD_SIZE;
         ram_loc = ((char *) attr->mem->mem_base) + initrd_addr;
-        off_t initrd_size =
-            map_file(&ram_loc, attr->data.system.initrd, INITRD_SIZE);
-        if (initrd_size < 0) {
+        ret = map_file(&ram_loc, attr->data.system.initrd, INITRD_SIZE);
+        if (ret < 0) {
             /* map_file returns -1 when file exceeds max_size */
             rv_log_fatal(
                 "Initrd file exceeds INITRD_SIZE (%u MiB).\n"
@@ -1257,7 +1271,7 @@ static void load_boot_images(vm_attr_t *attr)
                 INITRD_SIZE / (1024 * 1024));
             exit(EXIT_FAILURE);
         }
-        rv_log_info("Rootfs loaded (%ld bytes)", (long) initrd_size);
+        rv_log_info("Rootfs loaded (%ld bytes)", (long) ret);
     }
 }
 #endif /* RV32_HAS(SYSTEM_MMIO) */
