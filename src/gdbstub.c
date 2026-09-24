@@ -98,6 +98,9 @@ static gdb_action_t rv_cont(void *args)
 #if RV32_HAS(VIRTIO_NET)
         rv_refresh_vnet(rv);
 #endif
+#if RV32_HAS(VIRTIO_SND)
+        rv_refresh_vsnd(rv);
+#endif
     }
 
     /* Clear the interrupt if it's pending */
@@ -118,6 +121,9 @@ static gdb_action_t rv_stepi(void *args)
 #endif
 #if RV32_HAS(VIRTIO_NET)
     rv_refresh_vnet(rv);
+#endif
+#if RV32_HAS(VIRTIO_SND)
+    rv_refresh_vsnd(rv);
 #endif
     return ACT_RESUME;
 }

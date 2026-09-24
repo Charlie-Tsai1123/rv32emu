@@ -487,6 +487,11 @@ void rv_step_coroutine(void *arg);
 void rv_refresh_vnet(riscv_t *rv);
 #endif
 
+#if RV32_HAS(VIRTIO_SND)
+/* Propagate asynchronous virtio-snd completion interrupts periodically. */
+void rv_refresh_vsnd(riscv_t *rv);
+#endif
+
 /* set the program counter of a RISC-V emulator */
 bool rv_set_pc(riscv_t *rv, riscv_word_t pc);
 
@@ -586,6 +591,9 @@ typedef struct {
 #if RV32_HAS(VIRTIO_NET)
     char *vnet_backend;
 #endif
+#if RV32_HAS(VIRTIO_SND)
+    bool vsnd_enabled;
+#endif
 } vm_system_t;
 #endif /* RV32_HAS(SYSTEM) */
 
@@ -631,6 +639,12 @@ typedef struct {
     uint32_t vnet_mmio_base_hi;
     int vnet_irq;
 #endif /* RV32_HAS(VIRTIO_NET) */
+#if RV32_HAS(VIRTIO_SND)
+    /* virtio-snd device */
+    virtio_snd_state_t *vsnd;
+    uint32_t vsnd_mmio_base_hi;
+    int vsnd_irq;
+#endif /* RV32_HAS(VIRTIO_SND) */
 #endif /* RV32_HAS(SYSTEM_MMIO) */
 
     /* vm memory object */
