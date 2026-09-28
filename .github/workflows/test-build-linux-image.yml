@@ -1,0 +1,43 @@
+name: Test build-linux-image
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ftest/build-linux-image-ci
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository without submodules
+        uses: actions/checkout@v7
+
+      - name: Verify Linux image submodules are uninitialized
+        run: |
+          git submodule status tests/system/br_pkgs/doom_riscv
+          git submodule status tests/system/br_pkgs/quake
+
+          test ! -f tests/system/br_pkgs/doom_riscv/src/riscv/Makefile
+          test ! -f tests/system/br_pkgs/quake/CMakeLists.txt
+
+      - name: Install dependencies
+        run: .ci/apt-install.sh build-essential git
+
+      - name: Build Linux image
+        run: make build-linux-image
+
+      - name: Verify required submodules were initialized
+        run: |
+          test -f tests/system/br_pkgs/doom_riscv/src/riscv/Makefile
+          test -d tests/system/br_pkgs/quake
+
+      - name: Verify generated Linux image
+        run: |
+          test -f build/linux-image/Image
+          test -f build/linux-image/rootfs.cpio
