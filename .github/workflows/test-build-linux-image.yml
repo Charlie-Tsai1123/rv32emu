@@ -1,0 +1,86 @@
+name: Test build-linux-image
+
+on:
+  push:
+    branches:
+      - ftest/build-linux-image-fresh-ci
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository without submodules
+        uses: actions/checkout@v7
+
+      - name: Verify required submodules are uninitialized
+        run: |
+          git submodule status tests/system/br_pkgs/doom_riscv
+          git submodule status tests/system/br_pkgs/quake
+
+          test ! -f tests/system/br_pkgs/doom_riscv/src/riscv/Makefile
+          test ! -f tests/system/br_pkgs/quake/CMakeLists.txt
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            git \
+            pkg-config \
+            portaudio19-dev \
+            device-tree-compiler \
+            expect
+
+      - name: Build Linux image
+        run: make build-linux-image
+
+      - name: Verify submodules were initialized
+        run: |
+          git submodule status tests/system/br_pkgs/doom_riscv
+          git submodule status tests/system/br_pkgs/quake
+
+          test -f tests/system/br_pkgs/doom_riscv/src/riscv/Makefile
+          test -d tests/system/br_pkgs/quake
+
+      - name: Verify generated Linux image
+        run: |
+          test -f build/linux-image/Image
+          test -f build/linux-image/rootfs.cpio
+
+          ls -lh build/linux-image/
+
+      - name: Upload Linux image
+        uses: actions/upload-artifact@v4
+        with:
+          name: rv32emu-linux-image
+          path: |
+            build/linux-image/Image
+            build/linux-image/Image.gz
+            build/linux-image/rootfs.cpio
+            build/linux-image/rootfs.cpio.gz
+            build/linux-image/rootfs.ext4
+            build/linux-image/rootfs.ext4.gz
+            build/linux-image/simplefs.ko
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Build rv32emu with virtio-snd
+        run: |
+          make system_defconfig
+          make -j$(nproc)
+
+      - name: Verify rv32emu executable
+        run: |
+          test -x build/rv32emu
+          file build/rv32emu
+
+      - name: Test virtio-snd
+        env:
+          CI: "true"
+        run: .ci/sound.sh
