@@ -1,0 +1,106 @@
+name: Reproduce Doom Buildroot issue
+
+on:
+  push:
+    branches:
+      - ftest/doom-build-repro
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce-and-verify:
+    name: Ubuntu 24.04 Doom submodule A/B test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout without submodules
+        uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Verify submodules are missing
+        shell: bash
+        run: |
+          echo "=== Submodule state before test ==="
+
+          git submodule status \
+            tests/system/br_pkgs/doom_riscv \
+            tests/system/br_pkgs/quake || true
+
+          if [ -f tests/system/br_pkgs/doom_riscv/src/riscv/Makefile ]; then
+            echo "ERROR: Doom submodule is unexpectedly initialized"
+            exit 1
+          fi
+
+          echo "Doom source is missing as expected."
+
+      - name: Install dependencies
+        run: .ci/apt-install.sh build-essential git
+
+      - name: Reproduce failure without submodules
+        shell: bash
+        run: |
+          set +e
+
+          make build-linux-image 2>&1 | tee /tmp/doom-before.log
+          status=${PIPESTATUS[0]}
+
+          set -e
+
+          echo "First build exit status: ${status}"
+
+          if [ "${status}" -eq 0 ]; then
+            echo "ERROR: build unexpectedly succeeded without Doom submodule"
+            exit 1
+          fi
+
+          echo "=== Relevant failure lines ==="
+
+          grep -nE \
+            'doom|cannot stat|No such file or directory|riscv' \
+            /tmp/doom-before.log || true
+
+          grep -F "doom-1.0/riscv" /tmp/doom-before.log
+          grep -F "No such file or directory" /tmp/doom-before.log
+
+          echo "Successfully reproduced the reported Doom failure."
+
+      - name: Initialize required submodules
+        run: |
+          git submodule update --init --recursive
+
+          echo "=== Submodule state after initialization ==="
+
+          git submodule status \
+            tests/system/br_pkgs/doom_riscv \
+            tests/system/br_pkgs/quake
+
+          test -f tests/system/br_pkgs/doom_riscv/src/riscv/Makefile
+
+          echo "Doom source is now available."
+
+      - name: Remove stale Doom build state
+        run: |
+          rm -rf /tmp/buildroot/output/build/doom-1.0
+
+      - name: Verify build after initializing submodules
+        shell: bash
+        run: |
+          make build-linux-image 2>&1 | tee /tmp/doom-after.log
+
+          echo "=== Doom build after submodule initialization ==="
+
+          grep -nE \
+            '>>> doom|doom-1.0/riscv|Installing' \
+            /tmp/doom-after.log || true
+
+          if grep -Fq \
+            "doom-1.0/riscv: No such file or directory" \
+            /tmp/doom-after.log; then
+            echo "ERROR: Doom missing-directory failure still exists"
+            exit 1
+          fi
+
+          echo "Doom missing-directory failure is resolved."
