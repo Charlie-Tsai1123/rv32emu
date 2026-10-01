@@ -3358,7 +3358,7 @@ void rv_step(void *arg)
     uint32_t cycles = attr->cycle_per_step;
 
     /* find or translate a block for starting PC */
-    const uint64_t cycles_target = rv->csr_cycle + cycles;
+    uint64_t cycles_target = rv->csr_cycle + cycles;
 #if RV32_HAS_PACKED_TAIL
     rv->branch_chain_cycle_target = cycles_target;
 #endif
@@ -3377,6 +3377,7 @@ void rv_step(void *arg)
         need_handle_signal = false;
         prev = NULL;
         last_pc = 0;
+        cycles_target = rv->csr_cycle + cycles;
     }
 #endif
 
