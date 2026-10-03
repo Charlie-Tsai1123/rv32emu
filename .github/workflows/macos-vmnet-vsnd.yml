@@ -1,0 +1,44 @@
+name: macOS vmnet + virtio-snd test
+
+on:
+  push:
+    branches:
+      - test/macos-vmnet-vsnd
+
+permissions:
+  contents: read
+
+jobs:
+  macos-vmnet-vsnd:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: 'true'
+
+      - name: Set up build environment
+        uses: ./.github/actions/setup-build
+        with:
+          compiler: clang
+          riscv-toolchain: 'true'
+          artifacts: linux-image
+          cache-suffix: macos-vmnet-vsnd
+
+      - name: Build system emulator
+        run: |
+          make distclean
+          make system_defconfig
+          make INITRD_SIZE=32 $PARALLEL
+          make artifact $PARALLEL
+
+      - name: Verify features
+        run: |
+          grep '^CONFIG_VIRTIO_NET_VMNET=y$' .config
+          grep '^CONFIG_VIRTIO_SND=y$' .config
+
+      - name: Test vmnet with virtio-snd
+        env:
+          BOOT_TIMEOUT: 180
+        run: .ci/macos-vmnet-vsnd.sh
